@@ -55,26 +55,29 @@ public class TradingAgentService {
                     CURRENT TIME ANCHOR:
                     The present real-world date context is {LIVE_ANCHOR}. Every strategy or target option contract expiration you recommend must be calculated relative to this present date. The exact upcoming option clearing expiration date is definitively {EXPIRATION_DATE}. Do not output generic month names or stale historical years.
                   
-                    EXPLICIT COMPACT TEMPLATE REQUIREMENT WITH MULTI-TIMEFRAME PROTOCOL:
-                    Keep text brief and compact. Placeholders or 'N/A' elements are strictly forbidden. You must preserve the original layout format exactly so the HTML risk bar parser can read it, then append the Executive Action Playbook exactly as laid out below for each asset analyzed:
+                    EXPLICIT COMPACT TEMPLATE REQUIREMENT:
+                    Keep text brief, crisp, and clean. Placeholders or 'N/A' elements are strictly forbidden. You must preserve this exact layout format to fit the frontend layout and parsing rules perfectly:
 
                     ### [Ticker] - [Full Company Name]
-                    * **MOMENTUM VERDICT**: [Definitive structural posture statement matching your matching matrix rules: e.g. Buy Puts/Sell Calls or Buy Calls/Sell Puts.]
+                    * **MOMENTUM VERDICT**: [BULLISH or BEARISH] Trend Confirmed via Core Indicators & Multi-Timeframe (MTF) Alignment. Strategy: [Explicit, simple action command, e.g., BUY CALLS / BULL CALL SPREAD or BUY PUTS / BEAR PUT SPREAD].
                     * **BASELINE & CHANNELS**: Last: $[Price] ([Pct Change]) | Support: $[calculated_support] | Resistance: $[calculated_resistance]
-                    * **TREND SYNTHESIS & RATIONALE**: Trend: [Bullish/Bearish/Neutral] | Target: $[Price Target] | Analysis: [Provide a brief 1-2 sentence breakdown that explicitly details how the 9/21 EMA crossover trajectory and the 14-day RSI reading confirm this momentum strategy.]
+                    * **TREND SYNTHESIS & RATIONALE**: Trend: [Bullish/Bearish/Neutral] | Target: $[Price Target] | Analysis: [Provide a brief 1-2 sentence breakdown showing how the 9/21 EMA crossover trajectory and the 14-day RSI reading confirm this strategy.]
                     * **THE OPTIONS PLAY (DEFINED RISK)**: [Aligned Spread Strategy Name from the matrix rules] -> [Exact Strikes & Expiration Date: {EXPIRATION_DATE}]
-                    * **NAKED PLAY ALTERNATIVE (HIGH RISK)**: [Aligned Naked Option Buy or Sell recommendation from matrix rules] -> [Strike, Premium Target, & Expiration Date: {EXPIRATION_DATE}]
+                    * **NAKED PLAY ALTERNATIVE (HIGH RISK)**: [Aligned Naked Option Buy recommendation from matrix rules] -> [Strike, Premium Target, & Expiration Date: {EXPIRATION_DATE}]
                     * **RISK GATES**: Entry: $[Price] | Take-Profit: $[Target calculated relative to trend rules] | Stop-Loss: $[Risk Cutoff Price calculated relative to trend rules]
 
-                    **EXECUTIVE ACTION PLAYBOOK (PLAIN ENGLISH SUMMARY)**:
-                    * **CORE ACTION**: [State direct execution command, e.g., "BUY THE PUT OPTION contract to profit from downward momentum" or "BUY THE CALL OPTION SPREAD to capture upside velocity."]
-                    * **EXECUTION TRIGGER**: Open the position **ONLY when the market price reaches exactly $[Price]**. If the price does not reach this specific entry point level, **WAIT and do not enter the market until it does**.
-                    * **LIVE CHART TIMEFRAME CONFIVERIFICATION RADAR (MTF PROTOCOL)**: Before pulling the trigger at the execution price level, open your live charting software and verify that all three timeframes match these conditions:
-                      1. 🕒 **1-Hour Chart (Macro Trend Filter)**: Price must be trading completely [below/above] the core trendline baseline to prove that major institutions are participating in the direction.
-                      2. ⏱️ **15-Minute Chart (Intermediate Structural Pivot)**: Price must break [below the calculated support floor of $calculated_support / above the calculated resistance ceiling of $calculated_resistance] to confirm intraday acceleration.
-                      3. ⚡ **5-Minute Chart (Micro Entry Trigger)**: Wait for the current 5-minute candle to print a high-volume directional confirmation candle (e.g., [Bearish Engulfing/Bullish Engulfing]) exactly at the $[Price] trigger level before entering. If the 5-minute candle contradicts the play, **ABORT the entry and wait**.
+                    **EXECUTIVE ACTION PLAYBOOK (AUTOMATED MTF VERDICT SUMMARY)**:
+                    * **SYSTEM EXECUTION VERDICT**: [Output exactly one of these three explicit configurations:
+                      "🟢 ACCELERATE - BULLISH CONFLUENCE DETECTED (All timeframes are moving up together. Proceed with BUYING CALLS.)" OR 
+                      "🟢 ACCELERATE - BEARISH CONFLUENCE DETECTED (All timeframes are moving down together. Proceed with BUYING PUTS.)" OR 
+                      "🟡 STAND DOWN - MISALIGNED MARKET TRENDS (Timeframes conflict. Do not trade. Wait on the sidelines.)"]
+                    * **CORE ACTION COMMAND**: [Write plain English execution details based on the verdict, e.g., "TREND SATELLITES ARE HARMONIZED. Open the recommended option contract immediately at the trigger price of $[Price]." OR "MARKET HOVER ACTIVE. Do not open a position right now; wait until the 1-Hour, 15-Min, and 5-Min charts align into a unified direction."]
+                    * **PRE-COMPUTED TIMEFRAME DIAGNOSTICS**: The backend scanner has verified the live market charts:
+                      - 🕒 **1-Hour Macro Trend Filter**: [Output the exact value of h1_radar. Map 'BEARISH_BELOW_LINE' to 'Bearish Liquidation Territory' and 'BULLISH_ABOVE_LINE' to 'Institutional Support Velocity'.]
+                      - ⏱️ **15-Minute Intermediate Pivot**: [Output the exact value of m15_radar. Map 'BEARISH_LIQUIDATING' to 'Breakdown Below Structural Supports' and 'BULLISH_ACCELERATING' to 'Intraday Resistance Clearing'.]
+                      - ⚡ **5-Minute Micro Trigger**: [Output the exact value of m5_radar. Map 'BEARISH_RED_CANDLE' to 'Confirmed High-Volume Selling Pressure Candle' and 'BULLISH_GREEN_CANDLE' to 'Confirmed Buying Expansion Candle'.]
                     ---
-                    """
+                    """ // Fixed: Closed text block with triple double-quotes successfully
                     .replace("{LIVE_ANCHOR}", liveCalendarAnchor)
                     .replace("{EXPIRATION_DATE}", calculatedExpiration))
                 .defaultFunctions("stockPriceFunction", "historicalTrendFunction", "generalMarketScannerFunction")
@@ -89,7 +92,6 @@ public class TradingAgentService {
         return this.chatClient.prompt().user(input).call().content();
     }
 
-    // Thread-Isolated Hybrid Streaming Engine
     public Flux<String> streamAgentResponse(String input) {
         return Flux.<String>create(sink -> {
             try {
