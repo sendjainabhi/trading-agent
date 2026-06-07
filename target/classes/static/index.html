@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AlphaQuant Assistant</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            --bg-page: #f4f7f6;
+            --bg-chat: #ffffff;
+            --primary-blue: #0056b3;
+            --secondary-blue: #007bff;
+            --text-dark: #333333;
+            --text-light: #ffffff;
+            --bubble-agent: #f8f9fa;
+            --border-light: #e9ecef;
+        }
+
+        body {
+            background-color: var(--bg-page);
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: var(--text-dark);
+        }
+
+        .chat-container {
+            width: 100%;
+            max-width: 900px;
+            height: 92vh;
+            background-color: var(--bg-chat);
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            background-color: var(--primary-blue);
+            color: var(--text-light);
+            padding: 20px;
+            text-align: center;
+            font-size: 1.4rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 10;
+        }
+
+        .subtitle {
+            font-size: 0.85rem;
+            font-weight: 400;
+            opacity: 0.8;
+            margin-top: 4px;
+        }
+
+        #chat-window {
+            flex-grow: 1;
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            background-color: var(--bg-chat);
+        }
+
+        .message {
+            max-width: 85%;
+            padding: 14px 18px;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 1rem;
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background-color: var(--secondary-blue);
+            color: var(--text-light);
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.agent {
+            align-self: flex-start;
+            background-color: var(--bubble-agent);
+            color: var(--text-dark);
+            border: 1px solid var(--border-light);
+            border-bottom-left-radius: 4px;
+            width: 100%;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.02);
+        }
+
+        /* Markdown Table Formatting */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 16px 0;
+            background-color: var(--bg-chat);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 0 0 1px var(--border-light);
+        }
+        
+        th, td {
+            border: 1px solid var(--border-light);
+            padding: 12px 16px;
+            text-align: left;
+        }
+        
+        th {
+            background-color: #f1f3f5;
+            color: var(--primary-blue);
+            font-weight: 600;
+        }
+
+        tr:nth-child(even) {
+            background-color: #fcfcfc;
+        }
+
+        strong { color: var(--primary-blue); }
+
+        .control-panel {
+            display: flex;
+            padding: 20px;
+            background-color: var(--bg-chat);
+            border-top: 1px solid var(--border-light);
+            gap: 12px;
+        }
+
+        input[type="text"] {
+            flex-grow: 1;
+            padding: 14px 20px;
+            border: 1px solid #ced4da;
+            border-radius: 30px;
+            font-size: 1rem;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--secondary-blue);
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.15);
+        }
+
+        button {
+            background-color: var(--secondary-blue);
+            color: white;
+            border: none;
+            padding: 0 28px;
+            border-radius: 30px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+
+        button:hover {
+            background-color: var(--primary-blue);
+        }
+        
+        button:active {
+            transform: scale(0.98);
+        }
+        
+        .loading-text {
+            color: #6c757d;
+            font-style: italic;
+        }
+        .error-text {
+            color: #dc3545;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+
+<div class="chat-container">
+    <header>
+        AlphaQuant Assistant
+        <div class="subtitle">Abhishek - Trading AI Agent for Quantitative Analysis & Live Market Data</div>
+    </header>
+
+    <div id="chat-window">
+        <div class="message agent">
+            Hello! I am Abhishek - Trading AI Agent, your quantitative trading assistant. Ask me for live stock prices, trend evaluations, or trading recommendations.
+        </div>
+    </div>
+
+    <div class="control-panel">
+        <input type="text" id="commandInput" placeholder="Message AlphaQuant (e.g., 'Get the live price for AVGO...')" onkeydown="if(event.key === 'Enter') dispatchCommand()">
+        <button onclick="dispatchCommand()">Send</button>
+    </div>
+</div>
+
+<script>
+    async function dispatchCommand() {
+        const inputElement = document.getElementById('commandInput');
+        const rawText = inputElement.value.trim();
+        if (!rawText) return;
+
+        inputElement.value = '';
+        const chatWindow = document.getElementById('chat-window');
+
+        // Create User Message Bubble
+        const userMsg = document.createElement('div');
+        userMsg.className = 'message user';
+        userMsg.textContent = rawText; 
+        chatWindow.appendChild(userMsg);
+
+        // Create Agent Message Bubble (Placeholder for streaming)
+        const agentMsg = document.createElement('div');
+        agentMsg.className = 'message agent';
+        agentMsg.innerHTML = '<span class="loading-text">Fetching data and analyzing trends...</span>';
+        chatWindow.appendChild(agentMsg);
+        
+        // Auto-scroll to bottom
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+
+        try {
+            const response = await fetch('http://localhost:8080/api/chat/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ input: rawText })
+            });
+
+            if (!response.ok) throw new Error("Server rejected the request.");
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let processActive = true;
+            let finalOutputString = '';
+
+            while (processActive) {
+                const { value, done } = await reader.read();
+                if (done) {
+                    processActive = false;
+                    break;
+                }
+                
+                // Decode raw incoming plain-text stream tokens directly
+                const currentChunk = decoder.decode(value, { stream: true });
+                finalOutputString += currentChunk;
+                
+                // Parse accumulated markdown directly into the chat container layout
+                if (finalOutputString.trim()) {
+                    agentMsg.innerHTML = marked.parse(finalOutputString);
+                }
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
+
+        } catch (error) {
+            console.error(error);
+            agentMsg.innerHTML = '<span class="error-text">Connection Error: Ensure your Spring Boot Finnhub Backend is running on port 8080.</span>';
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+    }
+</script>
+</body>
+</html>

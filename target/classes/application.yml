@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: trading-agent
+  ai:
+    ollama:
+      base-url: http://127.0.0.1:11434
+      chat:
+        options:
+          model: qwen3:30b
+          temperature: 0.0
+
+
+market:
+  provider:
+    api-url: "https://finnhub.io/api/v1/quote?symbol="
+    news-url: "https://finnhub.io/api/v1/company-news?symbol="
+    api-key: "d8i9ia9r01qm63baq8o0d8i9ia9r01qm63baq8og"
+    connect-timeout-seconds: 5
+    read-timeout-seconds: 5
