@@ -19,7 +19,6 @@ public class TradingAgentController {
 
     public record ChatRequest(String input) {}
 
-    // FIX: Changed produces definition to TEXT_PLAIN_VALUE to stream raw text chunks seamlessly
     @PostMapping(value = "/api/chat/stream", produces = MediaType.TEXT_PLAIN_VALUE)
     public Flux<String> streamChat(@RequestBody ChatRequest request) {
         return this.tradingAgentService.streamAgentResponse(request.input());
