@@ -15,6 +15,8 @@
             --text-light: #ffffff;
             --bubble-agent: #f8f9fa;
             --border-light: #e9ecef;
+            --bullish-green: #28a745;
+            --bearish-red: #dc3545;
         }
 
         body {
@@ -100,7 +102,7 @@
             box-shadow: 0 2px 6px rgba(0,0,0,0.02);
         }
 
-        /* Markdown Table Formatting */
+        /* Table Design */
         table {
             border-collapse: collapse;
             width: 100%;
@@ -123,11 +125,71 @@
             font-weight: 600;
         }
 
-        tr:nth-child(even) {
-            background-color: #fcfcfc;
-        }
-
+        tr:nth-child(even) { background-color: #fcfcfc; }
         strong { color: var(--primary-blue); }
+
+        /* ENHANCEMENT: Risk Gate Visual Widget Track Styles */
+        .risk-visualizer-card {
+            background: #ffffff;
+            border: 1px solid var(--border-light);
+            border-left: 4px solid var(--secondary-blue);
+            border-radius: 6px;
+            padding: 16px;
+            margin: 14px 0 24px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+        .risk-card-title {
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #495057;
+            margin-bottom: 12px;
+        }
+        .risk-track-bar {
+            position: relative;
+            height: 10px;
+            background: #e9ecef;
+            border-radius: 5px;
+            margin: 25px 0 10px 0;
+        }
+        .risk-zone {
+            position: absolute;
+            height: 100%;
+            top: 0;
+            border-radius: 5px;
+        }
+        .risk-zone.profit { background-color: var(--bullish-green); opacity: 0.75; }
+        .risk-zone.loss { background-color: var(--bearish-red); opacity: 0.75; }
+        
+        .risk-node-pointer {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #212529;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            top: -1px;
+            transform: translateX(-50%);
+            z-index: 5;
+        }
+        .risk-node-label {
+            position: absolute;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
+            top: -22px;
+            transform: translateX(-50%);
+            color: #212529;
+        }
+        .risk-footer-targets {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: #6c757d;
+            font-weight: 500;
+            margin-top: 6px;
+        }
 
         .control-panel {
             display: flex;
@@ -165,22 +227,10 @@
             transition: background-color 0.2s, transform 0.1s;
         }
 
-        button:hover {
-            background-color: var(--primary-blue);
-        }
-        
-        button:active {
-            transform: scale(0.98);
-        }
-        
-        .loading-text {
-            color: #6c757d;
-            font-style: italic;
-        }
-        .error-text {
-            color: #dc3545;
-            font-weight: 500;
-        }
+        button:hover { background-color: var(--primary-blue); }
+        button:active { transform: scale(0.98); }
+        .loading-text { color: #6c757d; font-style: italic; }
+        .error-text { color: #dc3545; font-weight: 500; }
     </style>
 </head>
 <body>
@@ -204,6 +254,65 @@
 </div>
 
 <script>
+    // ENHANCEMENT: Programmatic Javascript visualizer parser component
+    function renderVisualRiskGates(container, markdownText) {
+        // Regex extracts individual gate coordinates directly from text string slices safely
+        const gateRegex = /RISK\s+GATES:\s*Entry:\s*\$*([0-9.,]+)\s*\|\s*Take-Profit:\s*\$*([0-9.,]+)\s*\|\s*Stop-Loss:\s*\$*([0-9.,]+)/gi;
+        let queryMatch;
+
+        // Process matches throughout the accumulated streamed Markdown content
+        while ((queryMatch = gateRegex.exec(markdownText)) !== null) {
+            const entry = parseFloat(queryMatch[1].replace(/,/g, ''));
+            const tp = parseFloat(queryMatch[2].replace(/,/g, ''));
+            const sl = parseFloat(queryMatch[3].replace(/,/g, ''));
+
+            if (isNaN(entry) || isNaN(tp) || isNaN(sl)) continue;
+
+            const isBullish = tp > entry;
+            const minBound = Math.min(entry, tp, sl);
+            const maxBound = Math.max(entry, tp, sl);
+            const span = (maxBound - minBound) || 1.0;
+
+            // Calculate percentage tracking ratios for horizontal spacing anchors
+            const entryPct = ((entry - minBound) / span) * 100;
+            const tpPct = ((tp - minBound) / span) * 100;
+            const slPct = ((sl - minBound) / span) * 100;
+
+            let profitZoneStyle = '';
+            let lossZoneStyle = '';
+
+            if (isBullish) {
+                profitZoneStyle = `left: ${entryPct}%; width: ${tpPct - entryPct}%;`;
+                lossZoneStyle = `left: ${slPct}%; width: ${entryPct - slPct}%;`;
+            } else {
+                profitZoneStyle = `left: ${tpPct}%; width: ${entryPct - tpPct}%;`;
+                lossZoneStyle = `left: ${entryPct}%; width: ${slPct - entryPct}%;`;
+            }
+
+            const visualComponentHtml = `
+                <div class="risk-visualizer-card">
+                    <div class="risk-card-title">🛡️ Execution Risk Guardrails Matrix</div>
+                    <div class="risk-track-bar">
+                        <div class="risk-zone profit" style="${profitZoneStyle}"></div>
+                        <div class="risk-zone loss" style="${lossZoneStyle}"></div>
+                        <div class="risk-node-pointer" style="left: ${entryPct}%;"><span class="risk-node-label">Entry: $${entry.toFixed(2)}</span></div>
+                    </div>
+                    <div class="risk-footer-targets">
+                        <span style="color: ${isBullish ? 'var(--bearish-red)' : 'var(--bullish-green)'}; font-weight:700;">
+                            ${isBullish ? '🛑 Stop-Loss: $' + sl.toFixed(2) : '🎯 Take-Profit: $' + tp.toFixed(2)}
+                        </span>
+                        <span style="color: ${isBullish ? 'var(--bullish-green)' : 'var(--bearish-red)'}; font-weight:700;">
+                            ${isBullish ? '🎯 Take-Profit: $' + tp.toFixed(2) : '🛑 Stop-Loss: $' + sl.toFixed(2)}
+                        </span>
+                    </div>
+                </div>
+            `;
+
+            // Inject the clean styled widget directly inside the specific text container response
+            container.innerHTML += visualComponentHtml;
+        }
+    }
+
     async function dispatchCommand() {
         const inputElement = document.getElementById('commandInput');
         const rawText = inputElement.value.trim();
@@ -224,7 +333,6 @@
         agentMsg.innerHTML = '<span class="loading-text">Fetching data and analyzing trends...</span>';
         chatWindow.appendChild(agentMsg);
         
-        // Auto-scroll to bottom
         chatWindow.scrollTop = chatWindow.scrollHeight;
 
         try {
@@ -248,16 +356,18 @@
                     break;
                 }
                 
-                // Decode raw incoming plain-text stream tokens directly
                 const currentChunk = decoder.decode(value, { stream: true });
                 finalOutputString += currentChunk;
                 
-                // Parse accumulated markdown directly into the chat container layout
                 if (finalOutputString.trim()) {
                     agentMsg.innerHTML = marked.parse(finalOutputString);
                 }
                 chatWindow.scrollTop = chatWindow.scrollHeight;
             }
+
+            // Post-Processing Phase: Render the matching visual gauges right after text generation finishes
+            renderVisualRiskGates(agentMsg, finalOutputString);
+            chatWindow.scrollTop = chatWindow.scrollHeight;
 
         } catch (error) {
             console.error(error);
