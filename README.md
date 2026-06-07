@@ -6,6 +6,17 @@ No more squinting at messy charts or guessing your next move—AlphaQuant gives 
 
 ---
 
+## 📋 Prerequisites (What You Need First)
+
+Before launching AlphaQuant, make sure you have these core pieces set up on your computer:
+
+* **Java & Maven:** You need **Java 17** (or newer) and **Maven** installed to compile and run the backend code.
+* **The AI Model (The Brain):** An AI model that supports **Function Calling** (the ability to use tools). If you are running your AI locally, make sure **Ollama** is active in the background with a capable model (such as `qwen3:30b` or similar).
+* **MCP (Model Context Protocol) Tools:** The system relies on Spring AI's built-in function-calling protocol. This acts as the MCP layer, allowing the AI model to automatically request live data from the Java backend when you ask a question.
+* **Market Data Access:** A free API key from **Finnhub** to pull live stock quotes and historical candle data.
+
+---
+
 ## ✨ What It Does Best
 
 * **Automatic Chart Checker:** The assistant looks at the 5-minute, 15-minute, and 1-hour charts all at once behind the scenes. It makes sure the short-term momentum and long-term institutional money are moving in the exact same direction before telling you to trade.
@@ -18,7 +29,7 @@ No more squinting at messy charts or guessing your next move—AlphaQuant gives 
 
 ## 🛠️ How It's Built
 
-* **The Brain (Backend):** Built with Java and Spring Boot. This handles all the heavy data lifting, math calculations, and live stock market connections in milliseconds.
+* **The Backend:** Built with Java and Spring Boot. This handles all the heavy data lifting, math calculations, MCP tool connections, and live stock market feeds in milliseconds.
 * **The Face (Frontend):** A clean, simple web page using basic HTML, CSS, and JavaScript. No messy installations or accounts required—just open it in your browser and type.
 
 ---
