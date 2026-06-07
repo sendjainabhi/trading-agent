@@ -51,7 +51,6 @@ public class McpServerConfig {
                 HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
                 
                 String companyName = ticker; 
-                
                 if (res.statusCode() == 200) {
                     JsonNode root = objectMapper.readTree(res.body());
                     double currentPrice = root.path("c").asDouble();
@@ -64,17 +63,12 @@ public class McpServerConfig {
                                 .timeout(Duration.ofSeconds(2))
                                 .GET().build();
                         HttpResponse<String> profileRes = httpClient.send(profileReq, HttpResponse.BodyHandlers.ofString());
-                        
                         if (profileRes.statusCode() == 200) {
                             JsonNode profileRoot = objectMapper.readTree(profileRes.body());
                             String fetchedName = profileRoot.path("name").asText("").trim();
-                            if (!fetchedName.isEmpty()) {
-                                companyName = fetchedName;
-                            }
+                            if (!fetchedName.isEmpty()) companyName = fetchedName;
                         }
-                    } catch (Exception e) {
-                        // Silent catch: fallback to ticker
-                    }
+                    } catch (Exception e) { /* Fallback to ticker symbol */ }
                     
                     return String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%.2f%%\",\"open\":%.2f,\"prior_close\":%.2f}",
                             ticker, companyName, currentPrice, root.path("d").asDouble(), root.path("dp").asDouble(),
@@ -86,7 +80,7 @@ public class McpServerConfig {
     }
 
     @Bean
-    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Gets the last 30 daily closing prices for trends and support/resistance calculation.")
+    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Programmatically calculates 30-day support floors, 30-day resistance ceilings, and the 20-day Simple Moving Average (SMA).")
     public Function<TickerRequest, String> historicalTrendFunction() {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
@@ -105,18 +99,35 @@ public class McpServerConfig {
                     }
                     JsonNode closePrices = root.path("c");
                     if (closePrices.isArray() && !closePrices.isEmpty()) {
-                        StringBuilder history = new StringBuilder("{\"symbol\":\"" + ticker + "\",\"closing_prices\":[");
                         int totalElements = closePrices.size();
-                        int startIndex = Math.max(0, totalElements - 30);
-                        for (int i = startIndex; i < totalElements; i++) {
-                            history.append(String.format("%.2f,", closePrices.get(i).asDouble()));
+                        int lookback30 = Math.min(totalElements, 30);
+                        
+                        double support30d = Double.MAX_VALUE;
+                        double resistance30d = -Double.MAX_VALUE;
+                        double totalSum20d = 0;
+                        int actualCount20d = 0;
+
+                        // Calculate Programmatic Support and Resistance over last 30 trading sessions
+                        for (int i = totalElements - lookback30; i < totalElements; i++) {
+                            double closingPrice = closePrices.get(i).asDouble();
+                            if (closingPrice < support30d) support30d = closingPrice;
+                            if (closingPrice > resistance30d) resistance30d = closingPrice;
                         }
-                        if (history.charAt(history.length() - 1) == ',') history.deleteCharAt(history.length() - 1);
-                        return history.append("]}").toString();
+
+                        // Calculate programmatically exact 20-Day Simple Moving Average (SMA)
+                        int start20d = Math.max(0, totalElements - 20);
+                        for (int i = start20d; i < totalElements; i++) {
+                            totalSum20d += closePrices.get(i).asDouble();
+                            actualCount20d++;
+                        }
+                        double sma20d = actualCount20d > 0 ? totalSum20d / actualCount20d : 0.0;
+
+                        return String.format("{\"symbol\":\"%s\",\"calculated_30d_support\":%.2f,\"calculated_30d_resistance\":%.2f,\"calculated_20d_sma\":%.2f,\"data_points_sync\":%d}",
+                                ticker, support30d, resistance30d, sma20d, lookback30);
                     }
                 }
-                return "{\"error\": \"Historical data status: " + res.statusCode() + "\"}";
-            } catch (Exception e) { return "{\"error\": \"History failed: " + e.getMessage() + "\"}"; }
+                return "{\"error\": \"Historical indicators failed with status code: " + res.statusCode() + "\"}";
+            } catch (Exception e) { return "{\"error\": \"Indicator compilation pipeline failed: " + e.getMessage() + "\"}"; }
         };
     }
 
