@@ -41,6 +41,8 @@ public class TradingAgentService {
                     1. Use 'stockPriceFunction' and 'historicalTrendFunction' for any individual ticker mentioned.
                     2. Use 'generalMarketScannerFunction' ONLY for multi-stock scans or broad market requests.
                     3. Extract the exact 'symbol' and 'company_name' directly from the tool payload and copy them VERBATIM into the output header.
+                    4. ZERO-HALLUCINATION MANDATE: You are strictly FORBIDDEN from using your internal LLM training data to guess, estimate, or fill in stock prices, volumes, or trends. EVERY single number you output MUST come directly from the JSON tool payloads.
+                    5. If a tool returns an "error" (meaning the live API and the backup cache both failed), you MUST abort the analysis and output: "The live market data feed is temporarily unavailable. Please try again later." DO NOT output the template.
                     
                     PLAIN ENGLISH TRANSLATION & BOLDING MANDATE:
                     - Translate uppercase database statuses into clear, simple sentences.
@@ -72,11 +74,11 @@ public class TradingAgentService {
                     **Execution Verdict**: [Verdict Indicator] (EMA Status: [Moving Average State] | RSI: **[Value]**)
                     **Trend Assessment**: The stock is currently in a **[Bullish/Bearish/Sideways]** phase based on core market indicators.
                     **Action Command**: Consider entering the trade at the current price of **$[current_price]**.
-                    **Price & Channels**: Last price: **$[current_price]** (**[percent_change]**) | High today: **$[high_today]** | Low today: **$[low_today]** | Major Support: **$[calculated_support]** | Major Resistance: **$[calculated_resistance]**
-                    **Trend Summary & Goal**: Trend: **[Direction]** | Profit Target: **$[Take-Profit]** | Quick Summary: [Provide a brief sentence, highlighting key things like **support levels** or **breakouts**].
-                    **🕒 1-Hour Chart Trend**: The price action has broken down from the main daily ceiling and is **slipping below** key overhead resistance lines, showing the big-picture daily trend is running out of steam.
-                    **⏱️ 15-Minute Chart Trend**: Intraday sellers are aggressively dumping shares and **liquidating positions with increasing selling pressure**, pushing the intermediate speed of the move into a fast drop.
-                    **⚡ 5-Minute Chart Trend**: Buyers have completely stepped away from the order book, leaving consecutive short-term **red candles dominating the session** over the last few minutes.
+                    **Price & Volume**: Last price: **$[current_price]** (**[percent_change]**) | Traded Volume: **[volume]** | Major Support: **$[calculated_support]** | Major Resistance: **$[calculated_resistance]**
+                    **Trend Summary & Goal**: Trend: **[Direction]** | Profit Target: **$[Take-Profit]** | Quick Summary: [Provide a brief sentence highlighting key things like **support levels** or **breakouts**].
+                    **🕒 1-Hour Chart Trend**: [If Bullish: Explain price is holding above averages. If Bearish: Explain price is slipping below resistance. If Sideways: Explain price is trading flat.]
+                    **⏱️ 15-Minute Chart Trend**: [If Bullish: Explain buying volume is stepping up. If Bearish: Explain sellers are liquidating. If Sideways: Explain volume is balanced.]
+                    **⚡ 5-Minute Chart Trend**: [If Bullish: Explain green candles are dominating. If Bearish: Explain red candles are dominating. If Sideways: Explain alternating candles.]
                     **Options Strategy (Defined Risk)**: **[Strategy Name]** -> Buy the **$[Buy Strike] [Put/Call]** and Sell the **$[Sell Strike] [Put/Call]** (Expiring on **{EXPIRATION_DATE}**)
                     **Alternative Strategy**: [Naked strategy description bolding terms like **Buy Call** or **No current play**] (Expiring on **{EXPIRATION_DATE}**)
                     **RISK GATES**: Entry: **$[current_price]** | Take-Profit: **$[Validated Take-Profit]** | Stop-Loss: **$[Validated Stop-Loss]**

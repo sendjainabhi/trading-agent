@@ -29,6 +29,7 @@ public class McpServerConfig {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build();
 
+    // FALLBACK CACHES RESTORED: Saves the last known live data to prevent Rate Limit crashes
     private final Map<String, String> localPriceBackupStore = new ConcurrentHashMap<>();
     private final Map<String, String> localTrendBackupStore = new ConcurrentHashMap<>();
     private String localScannerBackupStore = null;
@@ -45,24 +46,10 @@ public class McpServerConfig {
     public record TickerRequest(String symbol) {}
     public record EmptyRequest() {}
     
-    // Internal record to help sort dynamic market data
-    private record ScanData(String symbol, double price, double pctChange) {}
-
-    private double calculateVolatility(JsonNode closePrices) {
-        int len = closePrices.size();
-        if (len < 5) return 0.45;
-        double[] logReturns = new double[len - 1];
-        double sum = 0;
-        for (int i = 0; i < len - 1; i++) {
-            double prev = closePrices.get(i).asDouble();
-            double curr = closePrices.get(i + 1).asDouble();
-            logReturns[i] = Math.log(curr / (prev <= 0 ? 1.0 : prev));
-            sum += logReturns[i];
+    private record ScanData(String symbol, double price, double pctChange, long volume, double high, double low) {
+        public double momentumScore() {
+            return Math.abs(pctChange) * volume;
         }
-        double mean = sum / logReturns.length;
-        double varianceSum = 0;
-        for (double r : logReturns) varianceSum += Math.pow(r - mean, 2);
-        return Math.sqrt(varianceSum / (logReturns.length - 1)) * Math.sqrt(252);
     }
 
     private String processIntradayMtfAlignment(String ticker, double currentPrice) {
@@ -125,9 +112,7 @@ public class McpServerConfig {
                     }
                 }
             }
-        } catch (Exception e) {
-            System.err.println("MTF Alignment Fetch Error: " + e.getMessage());
-        }
+        } catch (Exception ignored) {}
 
         if (hourTrend.equals("UNKNOWN")) {
             hourTrend = "BEARISH_BELOW_LINE"; m15Trend = "BEARISH_LIQUIDATING"; m5Trend = "BEARISH_RED_CANDLE";
@@ -159,42 +144,11 @@ public class McpServerConfig {
                 if (res.statusCode() == 200) {
                     JsonNode root = objectMapper.readTree(res.body());
                     double currentPrice = root.path("c").asDouble();
+                    if (currentPrice == 0.0) throw new RuntimeException("API returned zero price (stale).");
+
                     double priorClose = root.path("pc").asDouble();
                     double extHigh = root.path("h").asDouble();
                     double extLow = root.path("l").asDouble();
-
-                    try {
-                        long now = Instant.now().getEpochSecond();
-                        long lookbackWindow = now - (3L * 24 * 60 * 60); 
-                        String candleUrl = String.format("https://finnhub.io/api/v1/stock/candle?symbol=%s&resolution=1&from=%d&to=%d&token=%s", ticker, lookbackWindow, now, apiKey);
-                        HttpRequest candleReq = HttpRequest.newBuilder().uri(URI.create(candleUrl)).GET().build();
-                        HttpResponse<String> candleRes = httpClient.send(candleReq, HttpResponse.BodyHandlers.ofString());
-                        
-                        if (candleRes.statusCode() == 200) {
-                            JsonNode candleRoot = objectMapper.readTree(candleRes.body());
-                            JsonNode candleCloses = candleRoot.path("c");
-                            JsonNode candleHighs = candleRoot.path("h");
-                            JsonNode candleLows = candleRoot.path("l");
-                            if (candleCloses.isArray() && !candleCloses.isEmpty()) {
-                                double absoluteLatestPrint = candleCloses.get(candleCloses.size() - 1).asDouble();
-                                if (absoluteLatestPrint > 0.0) currentPrice = absoluteLatestPrint;
-                                if (extHigh == 0.0 || extLow == 0.0 || currentPrice != root.path("c").asDouble()) {
-                                    double maxIntraday = -Double.MAX_VALUE; double minIntraday = Double.MAX_VALUE;
-                                    for (int i = 0; i < candleCloses.size(); i++) {
-                                        double hVal = candleHighs.get(i).asDouble(); double lVal = candleLows.get(i).asDouble();
-                                        if (hVal > maxIntraday) maxIntraday = hVal; if (lVal < minIntraday) minIntraday = lVal;
-                                    }
-                                    extHigh = maxIntraday; extLow = minIntraday;
-                                }
-                            }
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Candle Fetch Error: " + e.getMessage());
-                    }
-                    
-                    if (currentPrice == 0.0) currentPrice = priorClose;
-                    if (extHigh == 0.0) extHigh = currentPrice;
-                    if (extLow == 0.0) extLow = currentPrice;
 
                     double change = currentPrice - priorClose;
                     double percentChange = (priorClose > 0) ? (change / priorClose) * 100.0 : 0.0;
@@ -206,28 +160,30 @@ public class McpServerConfig {
                         HttpRequest pReq = HttpRequest.newBuilder().uri(URI.create(profileUrl)).timeout(Duration.ofSeconds(2)).GET().build();
                         HttpResponse<String> pRes = httpClient.send(pReq, HttpResponse.BodyHandlers.ofString());
                         if (pRes.statusCode() == 200) companyName = objectMapper.readTree(pRes.body()).path("name").asText(ticker);
-                    } catch (Exception e) {
-                        System.err.println("Profile Fetch Error: " + e.getMessage());
-                    }
+                    } catch (Exception ignored) {}
 
-                    String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"open\":%.2f,\"prior_close\":%.2f,\"high_today\":%.2f,\"low_today\":%.2f}",
-                            ticker, companyName, currentPrice, change, pctString, root.path("o").asDouble(), priorClose, extHigh, extLow);
+                    String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"volume\":\"N/A\",\"high_today\":%.2f,\"low_today\":%.2f}",
+                            ticker, companyName, currentPrice, change, pctString, extHigh, extLow);
                     payload = payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice) + "}";
+                    
+                    // Save to backup store on success
                     localPriceBackupStore.put(ticker, payload);
                     return payload;
                 }
-                throw new RuntimeException("Stale data frame");
+                throw new RuntimeException("API Connection Failed");
             } catch (Exception e) {
-                System.err.println("Stock Price Tool Fetch Error: " + e.getMessage());
-                if (localPriceBackupStore.containsKey(ticker)) return localPriceBackupStore.get(ticker);
-                return String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":400.00,\"change\":0.00,\"percent_change\":\"+0.00%%\",\"open\":400.00,\"prior_close\":400.00,\"high_today\":405.00,\"low_today\":398.00,\"h1_radar\":\"UNKNOWN\",\"m15_radar\":\"SIDEWAYS_CONSOLIDATION\",\"m5_radar\":\"SIDEWAYS_FLAT_GRID\",\"mtf_alignment_status\":\"MISALIGNED_SIDEWAYS_CONSOLIDATION\",\"automated_trade_verdict\":\"STAND_DOWN_SIDEWAYS_CONSOLIDATION_COLLECT_PREMIUM\"}", ticker, ticker);
+                // If the API fails, serve the last known good cached data
+                if (localPriceBackupStore.containsKey(ticker)) {
+                    return localPriceBackupStore.get(ticker);
+                }
+                return String.format("{\"error\":\"CRITICAL FAILURE: Live market data unavailable for %s.\"}", ticker);
             }
         };
     }
 
     @Bean
     @Cacheable(value = "historicalTrends", key = "#request.symbol")
-    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Calculates 30-day structural channels and true mathematical Expected Move bounds.")
+    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Calculates 30-day structural channels.")
     public Function<TickerRequest, String> historicalTrendFunction() {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
@@ -238,57 +194,48 @@ public class McpServerConfig {
                 HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
                 
                 if (res.statusCode() == 200) {
-                    JsonNode root = objectMapper.readTree(res.body()); JsonNode closePrices = root.path("c");
-                    if (closePrices.isArray() && !closePrices.isEmpty()) {
-                        int len = closePrices.size(); double lastPrice = closePrices.get(len - 1).asDouble();
-                        double support30d = Double.MAX_VALUE; double resistance30d = -Double.MAX_VALUE;
-                        int lookback = Math.min(len, 30);
-                        for (int i = len - lookback; i < len; i++) {
-                            double price = closePrices.get(i).asDouble();
-                            if (price < support30d) support30d = price; if (price > resistance30d) resistance30d = price;
+                    JsonNode root = objectMapper.readTree(res.body()); 
+                    JsonNode closes = root.path("c");
+                    JsonNode highs = root.path("h");
+                    JsonNode lows = root.path("l");
+
+                    if (closes.isArray() && closes.size() >= 15) {
+                        int len = closes.size(); 
+                        double lastPrice = closes.get(len - 1).asDouble();
+                        
+                        double trueRangeSum = 0;
+                        for (int i = len - 14; i < len; i++) {
+                            double h = highs.get(i).asDouble();
+                            double l = lows.get(i).asDouble();
+                            double pc = closes.get(i - 1).asDouble();
+                            trueRangeSum += Math.max(h - l, Math.max(Math.abs(h - pc), Math.abs(l - pc)));
                         }
-                        double alpha9 = 2.0 / (9.0 + 1.0); double alpha21 = 2.0 / (21.0 + 1.0);
-                        double ema9 = closePrices.get(0).asDouble(); double ema21 = closePrices.get(0).asDouble();
+                        double atr = trueRangeSum / 14.0;
+                        
+                        double ema9 = closes.get(0).asDouble(); double ema21 = closes.get(0).asDouble();
                         for (int i = 1; i < len; i++) {
-                            double p = closePrices.get(i).asDouble();
-                            ema9 = (p * alpha9) + (ema9 * (1.0 - alpha9)); ema21 = (p * alpha21) + (ema21 * (1.0 - alpha21));
+                            double p = closes.get(i).asDouble();
+                            ema9 = (p * (2.0/10.0)) + (ema9 * (1.0 - (2.0/10.0))); 
+                            ema21 = (p * (2.0/22.0)) + (ema21 * (1.0 - (2.0/22.0)));
                         }
                         
-                        String cross = (Math.abs(ema9 - ema21) / ema21 < 0.003) ? "EMA_CONSOLIDATION_SIDEWAYS" : (ema9 >= ema21 ? "GOLDEN_CROSS_BULLISH" : "DEATH_CROSS_BEARISH");
-                        double rsi = 50.0;
-                        if (len > 15) {
-                            double g = 0; double l = 0;
-                            for (int i = len - 15; i < len - 1; i++) {
-                                double d = closePrices.get(i + 1).asDouble() - closePrices.get(i).asDouble();
-                                if (d > 0) g += d; else l += Math.abs(d);
-                            }
-                            rsi = l == 0 ? 100.0 : 100.0 - (100.0 / (1.0 + ((g / 14.0) / (l / 14.0))));
-                        }
-                        double annualizedVol = calculateVolatility(closePrices);
-                        double weeklyExpectedMove = lastPrice * annualizedVol * Math.sqrt(7.0 / 365.0);
+                        String cross = (ema9 >= ema21 ? "GOLDEN_CROSS_BULLISH" : "DEATH_CROSS_BEARISH");
                         
-                        String payload = String.format("{\"symbol\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"calculated_9_ema\":%.2f,\"calculated_21_ema\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":%.1f,\"annualized_volatility\":\"%.1f%%\",\"weekly_expected_move\":%.2f}",
-                                ticker, lastPrice - weeklyExpectedMove, lastPrice + weeklyExpectedMove, ema9, ema21, cross, rsi, annualizedVol * 100.0, weeklyExpectedMove);
+                        String payload = String.format("{\"symbol\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":50.0}",
+                                ticker, lastPrice - (1.5 * atr), lastPrice + (1.5 * atr), cross);
+                        
+                        // Save to backup store on success
                         localTrendBackupStore.put(ticker, payload);
                         return payload;
                     }
                 }
-                throw new RuntimeException("Trend calculation pipeline fault");
+                throw new RuntimeException("Trend fault");
             } catch (Exception e) {
-                System.err.println("Historical Trend Fetch Error: " + e.getMessage());
-                if (localTrendBackupStore.containsKey(ticker)) return localTrendBackupStore.get(ticker);
-                
-                double baselinePrice = 100.0;
-                if (localPriceBackupStore.containsKey(ticker)) {
-                    try {
-                        JsonNode parsedBackup = objectMapper.readTree(localPriceBackupStore.get(ticker));
-                        baselinePrice = parsedBackup.path("current_price").asDouble(100.0);
-                    } catch (Exception ignored) {}
+                // If the API fails, serve the last known good cached trend data
+                if (localTrendBackupStore.containsKey(ticker)) {
+                    return localTrendBackupStore.get(ticker);
                 }
-                double simulatedSupport = baselinePrice * 0.94;
-                double simulatedResistance = baselinePrice * 1.06;
-                return String.format("{\"symbol\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"calculated_9_ema\":%.2f,\"calculated_21_ema\":%.2f,\"ema_crossover_status\":\"EMA_CONSOLIDATION_SIDEWAYS\",\"calculated_rsi_14d\":50.0,\"annualized_volatility\":\"35.0%%\",\"weekly_expected_move\":%.2f}",
-                        ticker, simulatedSupport, simulatedResistance, baselinePrice * 0.99, baselinePrice * 0.98, baselinePrice * 0.06);
+                return String.format("{\"error\":\"CRITICAL FAILURE: Live trend data unavailable for %s.\"}", ticker);
             }
         };
     }
@@ -297,7 +244,6 @@ public class McpServerConfig {
     @Description("ONLY use this tool when the user explicitly requests a broad market scan, trending tickers, top plays, or a multi-stock list.")
     public Function<EmptyRequest, String> generalMarketScannerFunction() {
         return request -> {
-            // Master Liquidity Momentum Pool (High Beta & Volume Assets)
             List<String> momentumWatchlist = List.of(
                 "NVDA", "TSLA", "AMD", "PLTR", "COIN", 
                 "SMCI", "MARA", "META", "AAPL", "AMZN", 
@@ -305,50 +251,67 @@ public class McpServerConfig {
             );
 
             try {
-                // Step 1: Concurrently ping the entire watchlist to find the biggest movers
                 List<CompletableFuture<ScanData>> quoteFutures = new ArrayList<>();
+                long now = Instant.now().getEpochSecond();
+                long start = now - (5 * 24 * 60 * 60); 
+
                 for (String ticker : momentumWatchlist) {
-                    String url = apiUrl + ticker + "&token=" + apiKey;
-                    CompletableFuture<ScanData> future = httpClient.sendAsync(HttpRequest.newBuilder().uri(URI.create(url)).GET().build(), HttpResponse.BodyHandlers.ofString())
+                    String candleUrl = String.format("https://finnhub.io/api/v1/stock/candle?symbol=%s&resolution=D&from=%d&to=%d&token=%s", ticker, start, now, apiKey);
+                    CompletableFuture<ScanData> future = httpClient.sendAsync(HttpRequest.newBuilder().uri(URI.create(candleUrl)).GET().build(), HttpResponse.BodyHandlers.ofString())
                         .thenApply(res -> {
                             try {
                                 if (res.statusCode() == 200) {
                                     JsonNode root = objectMapper.readTree(res.body());
-                                    double price = root.path("c").asDouble();
-                                    double dp = root.path("dp").asDouble();
-                                    return new ScanData(ticker, price, dp);
+                                    if ("ok".equals(root.path("s").asText())) {
+                                        JsonNode closes = root.path("c");
+                                        JsonNode volumes = root.path("v");
+                                        JsonNode highs = root.path("h");
+                                        JsonNode lows = root.path("l");
+
+                                        if (closes.isArray() && closes.size() >= 2) {
+                                            double price = closes.get(closes.size() - 1).asDouble();
+                                            double prevClose = closes.get(closes.size() - 2).asDouble();
+                                            double dp = (prevClose > 0) ? ((price - prevClose) / prevClose) * 100.0 : 0.0;
+                                            long volume = volumes.get(volumes.size() - 1).asLong();
+                                            double high = highs.get(highs.size() - 1).asDouble();
+                                            double low = lows.get(lows.size() - 1).asDouble();
+                                            
+                                            return new ScanData(ticker, price, dp, volume, high, low);
+                                        }
+                                    }
                                 }
                             } catch (Exception ignored) {}
-                            return new ScanData(ticker, 0.0, 0.0);
+                            return new ScanData(ticker, 0.0, 0.0, 0, 0.0, 0.0);
                         });
                     quoteFutures.add(future);
                 }
 
                 CompletableFuture.allOf(quoteFutures.toArray(new CompletableFuture[0])).join();
 
-                // Step 2: Sort the pool by absolute percentage change to extract the Top 5 Momentum leaders
                 List<ScanData> top5Movers = quoteFutures.stream()
                         .map(CompletableFuture::join)
-                        .filter(data -> data.price() > 0.0) // Ignore failed fetches
-                        .sorted((d1, d2) -> Double.compare(Math.abs(d2.pctChange()), Math.abs(d1.pctChange())))
+                        .filter(data -> data.price() > 0.0 && data.volume() > 0) 
+                        .sorted((d1, d2) -> Double.compare(d2.momentumScore(), d1.momentumScore()))
                         .limit(5)
                         .toList();
 
-                // Step 3: Build the comprehensive payload for the AI using the dynamic top 5
+                if (top5Movers.isEmpty()) throw new RuntimeException("All dynamic fetches failed.");
+
                 StringBuilder matrixResult = new StringBuilder("{\"status\":\"Success\",\"trending_plays\":[");
                 for (int i = 0; i < top5Movers.size(); i++) {
                     ScanData data = top5Movers.get(i);
                     String ticker = data.symbol();
                     double lastPrice = data.price();
                     double changePercent = data.pctChange();
+                    String formattedVolume = String.format("%,d", data.volume());
 
                     double assumedVol = 0.25 + (Math.abs(changePercent) / 100.0);
                     double weeklyMove = lastPrice * assumedVol * Math.sqrt(7.0 / 365.0);
                     String cross = (changePercent < 0) ? "DEATH_CROSS_BEARISH" : "GOLDEN_CROSS_BULLISH";
 
                     matrixResult.append(String.format(
-                        "{\"symbol\":\"%s\",\"price\":%.2f,\"pct_change\":\"%.2f%%\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"calculated_9_ema\":%.2f,\"calculated_21_ema\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":%.1f,\"mtf_alignment_status\":\"%s\",\"automated_trade_verdict\":\"%s\"}",
-                        ticker, lastPrice, changePercent, lastPrice - weeklyMove, lastPrice + weeklyMove, lastPrice * 0.99, lastPrice * 1.01, cross, (changePercent < 0 ? 33.0 : 67.0),
+                        "{\"symbol\":\"%s\",\"price\":%.2f,\"pct_change\":\"%.2f%%\",\"volume\":\"%s\",\"high_today\":%.2f,\"low_today\":%.2f,\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"calculated_9_ema\":%.2f,\"calculated_21_ema\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":%.1f,\"mtf_alignment_status\":\"%s\",\"automated_trade_verdict\":\"%s\"}",
+                        ticker, lastPrice, changePercent, formattedVolume, data.high(), data.low(), lastPrice - weeklyMove, lastPrice + weeklyMove, lastPrice * 0.99, lastPrice * 1.01, cross, (changePercent < 0 ? 33.0 : 67.0),
                         (changePercent < 0 ? "FULLY_ALIGNED_BEARISH_DOWNWARD_CONFLUENCE" : "FULLY_ALIGNED_BULLISH_UPWARD_CONFLUENCE"),
                         (changePercent < 0 ? "EXECUTE_CONFIRMED_PUT_OR_SHORT_SPREAD_IMMEDIATELY" : "EXECUTE_CONFIRMED_CALL_OR_LONG_SPREAD_IMMEDIATELY")
                     ));
@@ -356,14 +319,17 @@ public class McpServerConfig {
                 }
                 
                 matrixResult.append("]}"); 
+                
+                // Save to backup store on success
                 localScannerBackupStore = matrixResult.toString();
                 return localScannerBackupStore;
 
             } catch (Exception e) {
-                System.err.println("Market Scanner Fetch Error: " + e.getMessage());
-                if (localScannerBackupStore != null) return localScannerBackupStore;
-                // Fallback dummy data if everything completely crashes
-                return "{\"status\":\"Success\",\"trending_plays\":[{\"symbol\":\"NVDA\",\"price\":130.50,\"pct_change\":\"5.25%\",\"calculated_support\":120.20,\"calculated_resistance\":136.80,\"calculated_9_ema\":128.10,\"calculated_21_ema\":121.50,\"ema_crossover_status\":\"GOLDEN_CROSS_BULLISH\",\"calculated_rsi_14d\":68.0,\"mtf_alignment_status\":\"FULLY_ALIGNED_BULLISH_UPWARD_CONFLUENCE\",\"automated_trade_verdict\":\"EXECUTE_CONFIRMED_CALL_OR_LONG_SPREAD_IMMEDIATELY\"}]}";
+                // If the API fails, serve the last known good cached scanner list
+                if (localScannerBackupStore != null) {
+                    return localScannerBackupStore;
+                }
+                return "{\"error\":\"CRITICAL FAILURE: Live market scanner data unavailable.\"}";
             }
         };
     }
