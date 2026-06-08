@@ -74,10 +74,10 @@ public class TradingAgentService {
                     **Action Command**: Consider entering the trade at the current price of **$[current_price]**.
                     **Price & Channels**: Last price: **$[current_price]** (**[percent_change]**) | High today: **$[high_today]** | Low today: **$[low_today]** | Major Support: **$[calculated_support]** | Major Resistance: **$[calculated_resistance]**
                     **Trend Summary & Goal**: Trend: **[Direction]** | Profit Target: **$[Take-Profit]** | Quick Summary: [Provide a brief sentence, highlighting key things like **support levels** or **breakouts**].
-                    **🕒 1-Hour Chart Trend**: [Describe macro direction simply, bolding key trend attributes like **slipping below** or **holding above** lines].
-                    **⏱️ 15-Minute Chart Trend**: [Describe intermediate direction simply, bolding key momentum shifts like **picking up pace** or **slowing down**].
-                    **⚡ 5-Minute Chart Trend**: [Describe short-term direction simply, bolding core candle attributes like **red candles** or **green candles**].
-                    **Options Strategy (Defined Risk)**: **[Strategy Name]** -> [Execution details bolding exact strikes like **$X Call** & **$Y Put**] (Expiring on **{EXPIRATION_DATE}**)
+                    **🕒 1-Hour Chart Trend**: The price action has broken down from the main daily ceiling and is **slipping below** key overhead resistance lines, showing the big-picture daily trend is running out of steam.
+                    **⏱️ 15-Minute Chart Trend**: Intraday sellers are aggressively dumping shares and **liquidating positions with increasing selling pressure**, pushing the intermediate speed of the move into a fast drop.
+                    **⚡ 5-Minute Chart Trend**: Buyers have completely stepped away from the order book, leaving consecutive short-term **red candles dominating the session** over the last few minutes.
+                    **Options Strategy (Defined Risk)**: **[Strategy Name]** -> Buy the **$[Buy Strike] [Put/Call]** and Sell the **$[Sell Strike] [Put/Call]** (Expiring on **{EXPIRATION_DATE}**)
                     **Alternative Strategy**: [Naked strategy description bolding terms like **Buy Call** or **No current play**] (Expiring on **{EXPIRATION_DATE}**)
                     **RISK GATES**: Entry: **$[current_price]** | Take-Profit: **$[Validated Take-Profit]** | Stop-Loss: **$[Validated Stop-Loss]**
                     ---
