@@ -28,12 +28,13 @@
             align-items: center;
             height: 100vh;
             color: var(--text-dark);
+            overflow: hidden;
         }
 
         .chat-container {
-            width: 100%;
-            max-width: 900px;
-            height: 92vh;
+            width: 96%;
+            max-width: 1500px; 
+            height: 94vh;
             background-color: var(--bg-chat);
             border-radius: 12px;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
@@ -45,9 +46,9 @@
         header {
             background-color: var(--primary-blue);
             color: var(--text-light);
-            padding: 20px;
+            padding: 16px 20px;
             text-align: center;
-            font-size: 1.4rem;
+            font-size: 1.2rem;
             font-weight: 600;
             letter-spacing: 0.5px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
@@ -55,7 +56,7 @@
         }
 
         .subtitle {
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             font-weight: 400;
             opacity: 0.8;
             margin-top: 4px;
@@ -65,19 +66,23 @@
             flex-grow: 1;
             padding: 24px;
             overflow-y: auto;
+            overflow-x: hidden; 
             display: flex;
             flex-direction: column;
-            gap: 20px;
+            gap: 16px;
             background-color: var(--bg-chat);
         }
 
         .message {
-            max-width: 85%;
+            max-width: 100%;
             padding: 14px 18px;
             border-radius: 12px;
             line-height: 1.6;
-            font-size: 1rem;
+            font-size: 0.95rem; 
             animation: fadeIn 0.3s ease-in-out;
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+            word-break: break-word;
         }
 
         @keyframes fadeIn {
@@ -90,6 +95,7 @@
             background-color: var(--secondary-blue);
             color: var(--text-light);
             border-bottom-right-radius: 4px;
+            max-width: 80%;
         }
 
         .message.agent {
@@ -102,21 +108,36 @@
             box-shadow: 0 2px 6px rgba(0,0,0,0.02);
         }
 
-        /* Table Design */
+        .message.agent h3 {
+            font-size: 1.1rem;
+            margin-top: 6px;
+            margin-bottom: 10px;
+        }
+
+        .message.agent hr {
+            margin: 12px 0;
+            border: 0;
+            border-top: 1px solid var(--border-light);
+        }
+
         table {
             border-collapse: collapse;
             width: 100%;
+            table-layout: fixed;
             margin: 16px 0;
             background-color: var(--bg-chat);
             border-radius: 8px;
             overflow: hidden;
             box-shadow: 0 0 0 1px var(--border-light);
+            font-size: 0.9rem;
         }
         
         th, td {
             border: 1px solid var(--border-light);
             padding: 12px 16px;
             text-align: left;
+            overflow-wrap: break-word;
+            word-break: break-word;
         }
         
         th {
@@ -126,70 +147,6 @@
         }
 
         tr:nth-child(even) { background-color: #fcfcfc; }
-        strong { color: var(--primary-blue); }
-
-        /* ENHANCEMENT: Risk Gate Visual Widget Track Styles */
-        .risk-visualizer-card {
-            background: #ffffff;
-            border: 1px solid var(--border-light);
-            border-left: 4px solid var(--secondary-blue);
-            border-radius: 6px;
-            padding: 16px;
-            margin: 14px 0 24px 0;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        }
-        .risk-card-title {
-            font-size: 0.9rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #495057;
-            margin-bottom: 12px;
-        }
-        .risk-track-bar {
-            position: relative;
-            height: 10px;
-            background: #e9ecef;
-            border-radius: 5px;
-            margin: 25px 0 10px 0;
-        }
-        .risk-zone {
-            position: absolute;
-            height: 100%;
-            top: 0;
-            border-radius: 5px;
-        }
-        .risk-zone.profit { background-color: var(--bullish-green); opacity: 0.75; }
-        .risk-zone.loss { background-color: var(--bearish-red); opacity: 0.75; }
-        
-        .risk-node-pointer {
-            position: absolute;
-            width: 12px;
-            height: 12px;
-            background: #212529;
-            border: 2px solid #ffffff;
-            border-radius: 50%;
-            top: -1px;
-            transform: translateX(-50%);
-            z-index: 5;
-        }
-        .risk-node-label {
-            position: absolute;
-            font-size: 0.75rem;
-            font-weight: 600;
-            white-space: nowrap;
-            top: -22px;
-            transform: translateX(-50%);
-            color: #212529;
-        }
-        .risk-footer-targets {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.75rem;
-            color: #6c757d;
-            font-weight: 500;
-            margin-top: 6px;
-        }
 
         .control-panel {
             display: flex;
@@ -204,7 +161,7 @@
             padding: 14px 20px;
             border: 1px solid #ced4da;
             border-radius: 30px;
-            font-size: 1rem;
+            font-size: 0.95rem;
             font-family: inherit;
             outline: none;
             transition: border-color 0.2s, box-shadow 0.2s;
@@ -215,22 +172,29 @@
             box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.15);
         }
 
+        input[type="text"]:disabled {
+            background-color: #f8f9fa;
+            cursor: not-allowed;
+        }
+
         button {
             background-color: var(--secondary-blue);
             color: white;
             border: none;
             padding: 0 28px;
             border-radius: 30px;
-            font-size: 1rem;
+            font-size: 0.95rem;
             font-weight: 600;
             cursor: pointer;
             transition: background-color 0.2s, transform 0.1s;
         }
 
-        button:hover { background-color: var(--primary-blue); }
-        button:active { transform: scale(0.98); }
-        .loading-text { color: #6c757d; font-style: italic; }
-        .error-text { color: #dc3545; font-weight: 500; }
+        button:hover:not(:disabled) { background-color: var(--primary-blue); }
+        button:active:not(:disabled) { transform: scale(0.98); }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; }
+        
+        .loading-text { color: #6c757d; font-style: italic; font-size: 0.95rem; }
+        .error-text { color: #dc3545; font-weight: 500; font-size: 0.95rem; }
     </style>
 </head>
 <body>
@@ -249,85 +213,28 @@
 
     <div class="control-panel">
         <input type="text" id="commandInput" placeholder="Message AlphaQuant (e.g., 'Get the live price for AVGO...')" onkeydown="if(event.key === 'Enter') dispatchCommand()">
-        <button onclick="dispatchCommand()">Send</button>
+        <button id="sendButton" onclick="dispatchCommand()">Send</button>
     </div>
 </div>
 
 <script>
-    // ENHANCEMENT: Programmatic Javascript visualizer parser component
-    function renderVisualRiskGates(container, markdownText) {
-        // Regex extracts individual gate coordinates directly from text string slices safely
-        const gateRegex = /RISK\s+GATES:\s*Entry:\s*\$*([0-9.,]+)\s*\|\s*Take-Profit:\s*\$*([0-9.,]+)\s*\|\s*Stop-Loss:\s*\$*([0-9.,]+)/gi;
-        let queryMatch;
-
-        // Process matches throughout the accumulated streamed Markdown content
-        while ((queryMatch = gateRegex.exec(markdownText)) !== null) {
-            const entry = parseFloat(queryMatch[1].replace(/,/g, ''));
-            const tp = parseFloat(queryMatch[2].replace(/,/g, ''));
-            const sl = parseFloat(queryMatch[3].replace(/,/g, ''));
-
-            if (isNaN(entry) || isNaN(tp) || isNaN(sl)) continue;
-
-            const isBullish = tp > entry;
-            const minBound = Math.min(entry, tp, sl);
-            const maxBound = Math.max(entry, tp, sl);
-            const span = (maxBound - minBound) || 1.0;
-
-            // Calculate percentage tracking ratios for horizontal spacing anchors
-            const entryPct = ((entry - minBound) / span) * 100;
-            const tpPct = ((tp - minBound) / span) * 100;
-            const slPct = ((sl - minBound) / span) * 100;
-
-            let profitZoneStyle = '';
-            let lossZoneStyle = '';
-
-            if (isBullish) {
-                profitZoneStyle = `left: ${entryPct}%; width: ${tpPct - entryPct}%;`;
-                lossZoneStyle = `left: ${slPct}%; width: ${entryPct - slPct}%;`;
-            } else {
-                profitZoneStyle = `left: ${tpPct}%; width: ${entryPct - tpPct}%;`;
-                lossZoneStyle = `left: ${entryPct}%; width: ${slPct - entryPct}%;`;
-            }
-
-            const visualComponentHtml = `
-                <div class="risk-visualizer-card">
-                    <div class="risk-card-title">🛡️ Execution Risk Guardrails Matrix</div>
-                    <div class="risk-track-bar">
-                        <div class="risk-zone profit" style="${profitZoneStyle}"></div>
-                        <div class="risk-zone loss" style="${lossZoneStyle}"></div>
-                        <div class="risk-node-pointer" style="left: ${entryPct}%;"><span class="risk-node-label">Entry: $${entry.toFixed(2)}</span></div>
-                    </div>
-                    <div class="risk-footer-targets">
-                        <span style="color: ${isBullish ? 'var(--bearish-red)' : 'var(--bullish-green)'}; font-weight:700;">
-                            ${isBullish ? '🛑 Stop-Loss: $' + sl.toFixed(2) : '🎯 Take-Profit: $' + tp.toFixed(2)}
-                        </span>
-                        <span style="color: ${isBullish ? 'var(--bullish-green)' : 'var(--bearish-red)'}; font-weight:700;">
-                            ${isBullish ? '🎯 Take-Profit: $' + tp.toFixed(2) : '🛑 Stop-Loss: $' + sl.toFixed(2)}
-                        </span>
-                    </div>
-                </div>
-            `;
-
-            // Inject the clean styled widget directly inside the specific text container response
-            container.innerHTML += visualComponentHtml;
-        }
-    }
-
     async function dispatchCommand() {
         const inputElement = document.getElementById('commandInput');
+        const sendButton = document.getElementById('sendButton');
         const rawText = inputElement.value.trim();
         if (!rawText) return;
 
         inputElement.value = '';
+        inputElement.disabled = true;
+        sendButton.disabled = true;
+
         const chatWindow = document.getElementById('chat-window');
 
-        // Create User Message Bubble
         const userMsg = document.createElement('div');
         userMsg.className = 'message user';
         userMsg.textContent = rawText; 
         chatWindow.appendChild(userMsg);
 
-        // Create Agent Message Bubble (Placeholder for streaming)
         const agentMsg = document.createElement('div');
         agentMsg.className = 'message agent';
         agentMsg.innerHTML = '<span class="loading-text">Fetching data and analyzing trends...</span>';
@@ -348,6 +255,15 @@
             const decoder = new TextDecoder();
             let processActive = true;
             let finalOutputString = '';
+            let renderPending = false;
+            
+            const renderFrame = () => {
+                if (finalOutputString.trim()) {
+                    agentMsg.innerHTML = marked.parse(finalOutputString);
+                }
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+                renderPending = false;
+            };
 
             while (processActive) {
                 const { value, done } = await reader.read();
@@ -356,23 +272,24 @@
                     break;
                 }
                 
-                const currentChunk = decoder.decode(value, { stream: true });
-                finalOutputString += currentChunk;
+                finalOutputString += decoder.decode(value, { stream: true });
                 
-                if (finalOutputString.trim()) {
-                    agentMsg.innerHTML = marked.parse(finalOutputString);
+                if (!renderPending) {
+                    renderPending = true;
+                    requestAnimationFrame(renderFrame);
                 }
-                chatWindow.scrollTop = chatWindow.scrollHeight;
             }
 
-            // Post-Processing Phase: Render the matching visual gauges right after text generation finishes
-            renderVisualRiskGates(agentMsg, finalOutputString);
-            chatWindow.scrollTop = chatWindow.scrollHeight;
+            if (renderPending) renderFrame();
 
         } catch (error) {
             console.error(error);
             agentMsg.innerHTML = '<span class="error-text">Connection Error: Ensure your Spring Boot Finnhub Backend is running on port 8080.</span>';
             chatWindow.scrollTop = chatWindow.scrollHeight;
+        } finally {
+            inputElement.disabled = false;
+            sendButton.disabled = false;
+            inputElement.focus();
         }
     }
 </script>
