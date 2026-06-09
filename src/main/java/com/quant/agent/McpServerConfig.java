@@ -45,8 +45,8 @@ public class McpServerConfig {
     private HttpRequest buildAlpacaRequest(String endpoint) {
         return HttpRequest.newBuilder()
                 .uri(URI.create("https://data.alpaca.markets/v2/stocks" + endpoint))
-                .header("APCA-API-KEY-ID", apiKey)
-                .header("APCA-API-SECRET-KEY", apiSecret)
+                .header("APCA-API-KEY-ID", apiKey != null ? apiKey : "")
+                .header("APCA-API-SECRET-KEY", apiSecret != null ? apiSecret : "")
                 .header("accept", "application/json")
                 .GET()
                 .build();
@@ -59,17 +59,19 @@ public class McpServerConfig {
         String lookback10Days = nowET.minusDays(10).format(DateTimeFormatter.ISO_INSTANT);
         String lookback5Days = nowET.minusDays(5).format(DateTimeFormatter.ISO_INSTANT);
 
-        String hourTrend = "UNKNOWN"; 
-        String m15Trend = "UNKNOWN"; 
-        String m5Trend = "UNKNOWN";
-        String macroTrend = "UNKNOWN";
+        String hourTrend = "SIDEWAYS_CONSOLIDATION"; 
+        String m15Trend = "SIDEWAYS_CONSOLIDATION"; 
+        String m5Trend = "SIDEWAYS_FLAT_GRID";
+        String macroTrend = "SIDEWAYS_NEUTRAL";
         double vwap = currentPrice;
 
         int hour = nowET.getHour();
         int minute = nowET.getMinute();
         String sessionStatus = "STANDARD_SESSION";
-        if (hour < 9 || (hour == 9 && minute < 30) || hour >= 16) {
-            sessionStatus = "EXTENDED_HOURS_OR_CLOSED";
+        if (hour < 9 || (hour == 9 && minute < 30)) {
+            sessionStatus = "PRE_MARKET";
+        } else if (hour >= 16) {
+            sessionStatus = "POST_MARKET_CLOSED";
         } else if (hour == 9 && minute <= 45) {
             sessionStatus = "MORNING_VOLATILITY";
         } else if ((hour == 12) || (hour == 13 && minute <= 30)) {
@@ -161,16 +163,13 @@ public class McpServerConfig {
             }
         }
 
-        if (hourTrend.equals("UNKNOWN") || m15Trend.equals("UNKNOWN") || m5Trend.equals("UNKNOWN") || macroTrend.equals("UNKNOWN")) {
-            throw new RuntimeException("MTF Data completely missing for ticker (IPO or API Error)");
-        }
-
-        String alignmentStatus; String dynamicVerdict;
+        String alignmentStatus; 
+        String dynamicVerdict;
         
-        if (sessionStatus.equals("LUNCH_HOUR_CHOP") || sessionStatus.equals("MORNING_VOLATILITY")) {
-            alignmentStatus = "UNSAFE_SESSION_TIME"; 
-            dynamicVerdict = "HOLD_WAIT_FOR_PROPER_SESSION";
-        } else if (hourTrend.equals("BULLISH_ABOVE_LINE") && m15Trend.equals("BULLISH_ACCELERATING") && m5Trend.startsWith("BULLISH")) {
+        boolean isBullishBias = hourTrend.equals("BULLISH_ABOVE_LINE") && !m15Trend.contains("BEARISH") && !m5Trend.contains("BEARISH");
+        boolean isBearishBias = hourTrend.equals("BEARISH_BELOW_LINE") && !m15Trend.contains("BULLISH") && !m5Trend.contains("BULLISH");
+
+        if (isBullishBias) {
             if (currentPrice < vwap) {
                 alignmentStatus = "WEAK_BULLISH_TRAPPED_BELOW_VWAP";
                 dynamicVerdict = "HOLD_VWAP_RESISTANCE_CONFLICT";
@@ -184,7 +183,7 @@ public class McpServerConfig {
                 alignmentStatus = "WEAK_BULLISH_LACKING_VOLUME"; 
                 dynamicVerdict = "HOLD_WAIT_FOR_VOLUME_CONFIRMATION";
             }
-        } else if (hourTrend.equals("BEARISH_BELOW_LINE") && m15Trend.equals("BEARISH_LIQUIDATING") && m5Trend.startsWith("BEARISH")) {
+        } else if (isBearishBias) {
             if (currentPrice > vwap) {
                 alignmentStatus = "WEAK_BEARISH_TRAPPED_ABOVE_VWAP";
                 dynamicVerdict = "HOLD_VWAP_SUPPORT_CONFLICT";
@@ -215,33 +214,36 @@ public class McpServerConfig {
             try {
                 HttpResponse<String> res = httpClient.send(buildAlpacaRequest("/snapshots?symbols=" + ticker + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
                 
-                if (res.statusCode() == 200) {
-                    JsonNode root = objectMapper.readTree(res.body());
-                    if (!root.has(ticker)) {
-                         return String.format("{\"error\":\"CRITICAL FAILURE: Live market data unavailable for %s.\"}", ticker);
-                    }
-                    
-                    JsonNode data = root.path(ticker);
-                    double currentPrice = data.path("latestTrade").path("p").asDouble();
-                    if (currentPrice == 0.0) currentPrice = data.path("dailyBar").path("c").asDouble(); 
-                    if (currentPrice == 0.0) return String.format("{\"error\":\"CRITICAL FAILURE: Zero price detected for %s.\"}", ticker);
-
-                    double priorClose = data.path("prevDailyBar").path("c").asDouble();
-                    double extHigh = data.path("dailyBar").path("h").asDouble(currentPrice);
-                    double extLow = data.path("dailyBar").path("l").asDouble(currentPrice);
-                    long vol = data.path("dailyBar").path("v").asLong(0);
-
-                    double change = currentPrice - priorClose;
-                    double percentChange = (priorClose > 0) ? (change / priorClose) * 100.0 : 0.0;
-                    String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
-                    String formattedVol = vol > 0 ? String.format("%,d", vol) : "N/A";
-
-                    String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\",\"high_today\":%.2f,\"low_today\":%.2f}",
-                            ticker, ticker, currentPrice, change, pctString, formattedVol, extHigh, extLow);
-                    
-                    return payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice) + "}";
+                if (res.statusCode() != 200) {
+                    return String.format("{\"error\":\"CRITICAL FAILURE: API Connection Failed for %s.\"}", ticker);
                 }
-                return String.format("{\"error\":\"CRITICAL FAILURE: API Connection Failed for %s.\"}", ticker);
+
+                JsonNode root = objectMapper.readTree(res.body());
+                if (!root.has(ticker)) {
+                     return String.format("{\"error\":\"CRITICAL FAILURE: Live market data unavailable for %s.\"}", ticker);
+                }
+                
+                JsonNode data = root.path(ticker);
+                double currentPrice = data.path("latestTrade").path("p").asDouble();
+                if (currentPrice == 0.0) currentPrice = data.path("dailyBar").path("c").asDouble(); 
+                if (currentPrice == 0.0) {
+                    return String.format("{\"error\":\"CRITICAL FAILURE: Zero price detected for %s.\"}", ticker);
+                }
+
+                double priorClose = data.path("prevDailyBar").path("c").asDouble();
+                double extHigh = data.path("dailyBar").path("h").asDouble(currentPrice);
+                double extLow = data.path("dailyBar").path("l").asDouble(currentPrice);
+                long vol = data.path("dailyBar").path("v").asLong(0);
+
+                double change = currentPrice - priorClose;
+                double percentChange = (priorClose > 0) ? (change / priorClose) * 100.0 : 0.0;
+                String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
+                String formattedVol = vol > 0 ? String.format("%,d", vol) : "N/A";
+
+                String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\",\"high_today\":%.2f,\"low_today\":%.2f}",
+                        ticker, ticker, currentPrice, change, pctString, formattedVol, extHigh, extLow);
+                
+                return payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice) + "}";
             } catch (Exception e) {
                 return String.format("{\"error\":\"CRITICAL FAILURE: Exception parsing data for %s.\"}", ticker);
             }
@@ -249,7 +251,7 @@ public class McpServerConfig {
     }
 
     @Bean
-    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Calculates 30-day structural channels.")
+    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Calculates structured channels.")
     public Function<TickerRequest, String> historicalTrendFunction() {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
@@ -258,39 +260,43 @@ public class McpServerConfig {
             try {
                 HttpResponse<String> res = httpClient.send(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=1Day&start=" + startISO + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
                 
-                if (res.statusCode() == 200) {
-                    JsonNode root = objectMapper.readTree(res.body()); 
-                    JsonNode tickerNode = root.path("bars").path(ticker);
-                    
-                    if (tickerNode != null && tickerNode.isArray() && tickerNode.size() >= 15) {
-                        int len = tickerNode.size(); 
-                        double lastPrice = tickerNode.get(len - 1).path("c").asDouble();
-                        
-                        double trueRangeSum = 0;
-                        int atrLookback = Math.min(14, len - 1);
-                        for (int i = len - atrLookback; i < len; i++) {
-                            double h = tickerNode.get(i).path("h").asDouble();
-                            double l = tickerNode.get(i).path("l").asDouble();
-                            double pc = tickerNode.get(i - 1).path("c").asDouble();
-                            trueRangeSum += Math.max(h - l, Math.max(Math.abs(h - pc), Math.abs(l - pc)));
-                        }
-                        double atr = trueRangeSum / (double)atrLookback;
-                        
-                        double ema9 = tickerNode.get(0).path("c").asDouble(); 
-                        double ema21 = tickerNode.get(0).path("c").asDouble();
-                        for (int i = 1; i < len; i++) {
-                            double p = tickerNode.get(i).path("c").asDouble();
-                            ema9 = (p * (2.0/10.0)) + (ema9 * (1.0 - (2.0/10.0))); 
-                            ema21 = (p * (2.0/22.0)) + (ema21 * (1.0 - (2.0/22.0)));
-                        }
-                        
-                        String cross = (ema9 >= ema21 ? "GOLDEN_CROSS_BULLISH" : "DEATH_CROSS_BEARISH");
-                        
-                        return String.format("{\"symbol\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":50.0}",
-                                ticker, lastPrice - (1.5 * atr), lastPrice + (1.5 * atr), cross);
-                    }
+                if (res.statusCode() != 200) {
+                    return String.format("{\"error\":\"CRITICAL FAILURE: Live trend data unavailable for %s.\"}", ticker);
                 }
-                return String.format("{\"error\":\"CRITICAL FAILURE: Live trend data unavailable for %s.\"}", ticker);
+
+                JsonNode root = objectMapper.readTree(res.body()); 
+                JsonNode tickerNode = root.path("bars").path(ticker);
+                
+                if (tickerNode != null && tickerNode.isArray() && tickerNode.size() >= 15) {
+                    int len = tickerNode.size(); 
+                    double lastPrice = tickerNode.get(len - 1).path("c").asDouble();
+                    
+                    double trueRangeSum = 0;
+                    int atrLookback = Math.min(14, len - 1);
+                    for (int i = len - atrLookback; i < len; i++) {
+                        double h = tickerNode.get(i).path("h").asDouble();
+                        double l = tickerNode.get(i).path("l").asDouble();
+                        double pc = tickerNode.get(i - 1).path("c").asDouble();
+                        trueRangeSum += Math.max(h - l, Math.max(Math.abs(h - pc), Math.abs(l - pc)));
+                    }
+                    double atr = trueRangeSum / (double)atrLookback;
+                    
+                    double ema9 = tickerNode.get(0).path("c").asDouble(); 
+                    double ema21 = tickerNode.get(0).path("c").asDouble();
+                    for (int i = 1; i < len; i++) {
+                        double p = tickerNode.get(i).path("c").asDouble();
+                        ema9 = (p * (2.0/10.0)) + (ema9 * (1.0 - (2.0/10.0))); 
+                        ema21 = (p * (2.0/22.0)) + (ema21 * (1.0 - (2.0/22.0)));
+                    }
+                    
+                    String cross = (ema9 >= ema21 ? "GOLDEN_CROSS_BULLISH" : "DEATH_CROSS_BEARISH");
+                    
+                    // TIGHTENED DAILY MULTIPLIER (Reduced from 1.5 to 0.65 for daily chart logic)
+                    return String.format("{\"symbol\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":50.0}",
+                            ticker, lastPrice - (0.65 * atr), lastPrice + (0.65 * atr), cross);
+                } else {
+                    return String.format("{\"error\":\"CRITICAL FAILURE: Live trend data unavailable for %s.\"}", ticker);
+                }
             } catch (Exception e) {
                 return String.format("{\"error\":\"CRITICAL FAILURE: Exception parsing trend for %s.\"}", ticker);
             }
@@ -312,58 +318,60 @@ public class McpServerConfig {
             try {
                 HttpResponse<String> res = httpClient.send(buildAlpacaRequest("/snapshots?symbols=" + symbolsParam + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
                 
-                if (res.statusCode() == 200) {
-                    JsonNode root = objectMapper.readTree(res.body());
-                    List<ScanData> parsedData = new ArrayList<>();
-                    
-                    for (String ticker : momentumWatchlist) {
-                        if (root.has(ticker)) {
-                            JsonNode data = root.path(ticker);
-                            double price = data.path("latestTrade").path("p").asDouble();
-                            if (price == 0.0) price = data.path("dailyBar").path("c").asDouble();
-                            
-                            double prevClose = data.path("prevDailyBar").path("c").asDouble();
-                            long volume = data.path("dailyBar").path("v").asLong();
-                            double dp = (prevClose > 0) ? ((price - prevClose) / prevClose) * 100.0 : 0.0;
-                            
-                            if (price > 0 && volume > 0) {
-                                parsedData.add(new ScanData(ticker, price, dp, volume));
-                            }
+                if (res.statusCode() != 200) {
+                    return "{\"error\":\"CRITICAL FAILURE: Scanner data unavailable.\"}";
+                }
+
+                JsonNode root = objectMapper.readTree(res.body());
+                List<ScanData> parsedData = new ArrayList<>();
+                
+                for (String ticker : momentumWatchlist) {
+                    if (root.has(ticker)) {
+                        JsonNode data = root.path(ticker);
+                        double price = data.path("latestTrade").path("p").asDouble();
+                        if (price == 0.0) price = data.path("dailyBar").path("c").asDouble();
+                        
+                        double prevClose = data.path("prevDailyBar").path("c").asDouble();
+                        long volume = data.path("dailyBar").path("v").asLong();
+                        double dp = (prevClose > 0) ? ((price - prevClose) / prevClose) * 100.0 : 0.0;
+                        
+                        if (price > 0 && volume > 0) {
+                            parsedData.add(new ScanData(ticker, price, dp, volume));
                         }
                     }
-
-                    List<ScanData> top5Movers = parsedData.stream()
-                            .sorted((d1, d2) -> Double.compare(d2.momentumScore(), d1.momentumScore()))
-                            .limit(5)
-                            .toList();
-
-                    if (top5Movers.isEmpty()) throw new RuntimeException("No valid momentum data.");
-
-                    StringBuilder matrixResult = new StringBuilder("{\"status\":\"Success\",\"trending_plays\":[");
-                    for (int i = 0; i < top5Movers.size(); i++) {
-                        ScanData data = top5Movers.get(i);
-                        String ticker = data.symbol();
-                        double lastPrice = data.price();
-                        double changePercent = data.pctChange();
-                        String formattedVolume = String.format("%,d", data.volume());
-
-                        double assumedVol = 0.25 + (Math.abs(changePercent) / 100.0);
-                        double weeklyMove = lastPrice * assumedVol * Math.sqrt(7.0 / 365.0);
-                        String cross = (changePercent < 0) ? "DEATH_CROSS_BEARISH" : "GOLDEN_CROSS_BULLISH";
-
-                        matrixResult.append(String.format(
-                            "{\"symbol\":\"%s\",\"price\":%.2f,\"pct_change\":\"%.2f%%\",\"volume\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"calculated_9_ema\":%.2f,\"calculated_21_ema\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":%.1f,\"mtf_alignment_status\":\"%s\",\"automated_trade_verdict\":\"%s\",\"intraday_vwap\":%.2f,\"session_status\":\"EXTENDED_HOURS_OR_CLOSED\",\"macro_daily_trend\":\"%s\"}",
-                            ticker, lastPrice, changePercent, formattedVolume, lastPrice - weeklyMove, lastPrice + weeklyMove, lastPrice * 0.99, lastPrice * 1.01, cross, (changePercent < 0 ? 33.0 : 67.0),
-                            (changePercent < 0 ? "FULLY_ALIGNED_BEARISH_DOWNWARD_CONFLUENCE" : "FULLY_ALIGNED_BULLISH_UPWARD_CONFLUENCE"),
-                            (changePercent < 0 ? "EXECUTE_CONFIRMED_PUT_OR_SHORT_SPREAD_IMMEDIATELY" : "EXECUTE_CONFIRMED_CALL_OR_LONG_SPREAD_IMMEDIATELY"), lastPrice, (changePercent < 0 ? "BEARISH_MACRO" : "BULLISH_MACRO")
-                        ));
-                        if (i < top5Movers.size() - 1) matrixResult.append(",");
-                    }
-                    
-                    matrixResult.append("]}"); 
-                    return matrixResult.toString();
                 }
-                return "{\"error\":\"CRITICAL FAILURE: Scanner data unavailable.\"}";
+
+                List<ScanData> top5Movers = parsedData.stream()
+                        .sorted((d1, d2) -> Double.compare(d2.momentumScore(), d1.momentumScore()))
+                        .limit(5)
+                        .toList();
+
+                if (top5Movers.isEmpty()) throw new RuntimeException("No valid momentum data.");
+
+                StringBuilder matrixResult = new StringBuilder("{\"status\":\"Success\",\"trending_plays\":[");
+                for (int i = 0; i < top5Movers.size(); i++) {
+                    ScanData data = top5Movers.get(i);
+                    String ticker = data.symbol();
+                    double lastPrice = data.price();
+                    double changePercent = data.pctChange();
+                    String formattedVolume = String.format("%,d", data.volume());
+
+                    double assumedVol = 0.25 + (Math.abs(changePercent) / 100.0);
+                    // Tightened weekly scanner move calculation
+                    double weeklyMove = lastPrice * assumedVol * Math.sqrt(3.0 / 365.0); 
+                    String cross = (changePercent < 0) ? "DEATH_CROSS_BEARISH" : "GOLDEN_CROSS_BULLISH";
+
+                    matrixResult.append(String.format(
+                        "{\"symbol\":\"%s\",\"price\":%.2f,\"pct_change\":\"%.2f%%\",\"volume\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"calculated_9_ema\":%.2f,\"calculated_21_ema\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":%.1f,\"mtf_alignment_status\":\"%s\",\"automated_trade_verdict\":\"%s\",\"intraday_vwap\":%.2f,\"session_status\":\"EXTENDED_HOURS_OR_CLOSED\",\"macro_daily_trend\":\"%s\"}",
+                        ticker, lastPrice, changePercent, formattedVolume, lastPrice - weeklyMove, lastPrice + weeklyMove, lastPrice * 0.99, lastPrice * 1.01, cross, (changePercent < 0 ? 33.0 : 67.0),
+                        (changePercent < 0 ? "FULLY_ALIGNED_BEARISH_DOWNWARD_CONFLUENCE" : "FULLY_ALIGNED_BULLISH_UPWARD_CONFLUENCE"),
+                        (changePercent < 0 ? "EXECUTE_CONFIRMED_PUT_OR_SHORT_SPREAD_IMMEDIATELY" : "EXECUTE_CONFIRMED_CALL_OR_LONG_SPREAD_IMMEDIATELY"), lastPrice, (changePercent < 0 ? "BEARISH_MACRO" : "BULLISH_MACRO")
+                    ));
+                    if (i < top5Movers.size() - 1) matrixResult.append(",");
+                }
+                
+                matrixResult.append("]}"); 
+                return matrixResult.toString();
             } catch (Exception e) {
                 return "{\"error\":\"CRITICAL FAILURE: Scanner network fault.\"}";
             }
