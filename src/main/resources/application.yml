@@ -13,6 +13,12 @@ spring:
           temperature: 0.0
 
 
+alpaca:
+  api:
+    key: "PKR4CIRX4QSVMPQ7BEITOV6MFB"
+    secret: "8m9APJBfKtJpAoaxqFsCLBx3WRyBHVJdSzuWVBtXWrZm"
+
+
 market:
   provider:
     api-url: "https://finnhub.io/api/v1/quote?symbol="
