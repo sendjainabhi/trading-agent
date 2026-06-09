@@ -4,5 +4,4 @@ com/quant/agent/TradingAgentController$ChatRequest.class
 com/quant/agent/AlphaQuantAgentApplication.class
 com/quant/agent/McpServerConfig$EmptyRequest.class
 com/quant/agent/TradingAgentController.class
-com/quant/agent/McpServerConfig$ScanData.class
 com/quant/agent/McpServerConfig.class
