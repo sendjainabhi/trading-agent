@@ -48,6 +48,19 @@ public class McpServerConfig {
         return buildAlpacaBaseRequest("/v2/stocks" + endpoint);
     }
 
+    // Real-world options exchange increment rounding algorithm
+    private double getNearestOptionStrike(double price) {
+        if (price <= 50.0) {
+            return Math.round(price * 2.0) / 2.0; // $0.50 increments
+        } else if (price <= 200.0) {
+            return Math.round(price); // $1.00 increments
+        } else if (price <= 500.0) {
+            return Math.round(price / 2.5) * 2.5; // $2.50 increments
+        } else {
+            return Math.round(price / 5.0) * 5.0; // $5.00 increments
+        }
+    }
+
     private String processIntradayMtfAlignment(String ticker, double currentPrice, double highToday, double lowToday, long totalVolume, double priorClose) throws Exception {
         ZonedDateTime nowET = ZonedDateTime.now(ZoneId.of("America/New_York"));
         
@@ -131,7 +144,6 @@ public class McpServerConfig {
             }
         }
 
-        // SMOOTHING SHIFT: Ensures indicators map to current price structures
         if (Math.abs(currentPrice - vwap) / currentPrice > 0.08) {
             vwap = currentPrice;
         }
@@ -171,17 +183,29 @@ public class McpServerConfig {
             impliedVolatility = Math.min(impliedVolatility, 0.80);
         }
 
-        double oneDayExpectedMove = currentPrice * impliedVolatility * Math.sqrt(1.0 / 365.0);
-        double fiveDayExpectedMove = currentPrice * impliedVolatility * Math.sqrt(5.0 / 365.0);
+        // 1. VOLATILITY DEFLATOR: Strip out the 15% market maker fear premium
+        double realizedVolEstimate = impliedVolatility * 0.85;
 
-        double tomorrowUpper = currentPrice + oneDayExpectedMove;
-        double tomorrowLower = currentPrice - oneDayExpectedMove;
-        double nextWeekUpper = currentPrice + fiveDayExpectedMove;
-        double nextWeekLower = currentPrice - fiveDayExpectedMove;
+        // 2. TIME CONVERSION: Use 252 trading days instead of 365 calendar days for intraday accuracy
+        double oneDayExpectedMove = currentPrice * realizedVolEstimate * Math.sqrt(1.0 / 252.0);
+        double fiveDayExpectedMove = currentPrice * realizedVolEstimate * Math.sqrt(5.0 / 252.0);
 
-        double dailyNoisePercentage = (impliedVolatility / Math.sqrt(252)) * 0.20; 
-        if (dailyNoisePercentage < 0.005) dailyNoisePercentage = 0.005; 
-        if (dailyNoisePercentage > 0.025) dailyNoisePercentage = 0.025; 
+        // 3. DIRECTIONAL SKEW: Shift the center anchor based on the day's trend momentum
+        double rangeAnchor = currentPrice;
+        if (totalConfluenceScore <= -40.0) {
+            rangeAnchor = currentPrice - (oneDayExpectedMove * 0.35); 
+        } else if (totalConfluenceScore >= 40.0) {
+            rangeAnchor = currentPrice + (oneDayExpectedMove * 0.35); 
+        }
+
+        double tomorrowUpper = rangeAnchor + oneDayExpectedMove;
+        double tomorrowLower = rangeAnchor - oneDayExpectedMove;
+        double nextWeekUpper = rangeAnchor + fiveDayExpectedMove;
+        double nextWeekLower = rangeAnchor - fiveDayExpectedMove;
+
+        // --- SYNCHRONIZED RISK LIMITS ---
+        double minBreathableMove = currentPrice * 0.015; 
+        double tradeTargetDistance = Math.max(oneDayExpectedMove, minBreathableMove);
 
         double dynamicEntry = currentPrice;
         double dynamicSl = currentPrice;
@@ -191,31 +215,36 @@ public class McpServerConfig {
         if (totalConfluenceScore >= 70.0) {
             dynamicVerdict = "EXECUTE_CALL_OR_LONG_SPREAD";
             dynamicEntry = currentPrice;
-            dynamicSl = microSupport;
-            double risk = dynamicEntry - dynamicSl;
-            dynamicTp = dynamicEntry + (2.0 * (risk > 0 ? risk : currentPrice * 0.01));
+            dynamicTp = Math.max(currentPrice + minBreathableMove, tomorrowUpper);
+            dynamicSl = Math.max(currentPrice - minBreathableMove, tomorrowLower);
         } else if (totalConfluenceScore >= 15.0) {
             dynamicVerdict = "PREPARE_LONG_BUY_DIP_AT_VWAP";
-            dynamicEntry = vwap;
-            dynamicSl = vwap * (1.0 - dailyNoisePercentage);
-            dynamicTp = dynamicEntry + (2.0 * (dynamicEntry - dynamicSl));
+            dynamicEntry = (vwap < currentPrice) ? vwap : currentPrice - (tradeTargetDistance * 0.3);
+            dynamicTp = Math.max(dynamicEntry + minBreathableMove, tomorrowUpper);
+            dynamicSl = dynamicEntry - (tradeTargetDistance * 0.6);
         } else if (totalConfluenceScore <= -70.0) {
             dynamicVerdict = "EXECUTE_PUT_OR_SHORT_SPREAD";
             dynamicEntry = currentPrice;
-            dynamicSl = microResistance;
-            double risk = dynamicSl - dynamicEntry;
-            dynamicTp = dynamicEntry - (2.0 * (risk > 0 ? risk : currentPrice * 0.01));
+            dynamicTp = Math.min(currentPrice - minBreathableMove, tomorrowLower);
+            dynamicSl = Math.min(currentPrice + minBreathableMove, tomorrowUpper);
         } else if (totalConfluenceScore <= -15.0) {
             dynamicVerdict = "PREPARE_SHORT_FADE_BOUNCE_AT_VWAP";
-            dynamicEntry = vwap;
-            dynamicSl = vwap * (1.0 + dailyNoisePercentage);
-            dynamicTp = dynamicEntry - (2.0 * (dynamicSl - dynamicEntry));
+            dynamicEntry = (vwap > currentPrice) ? vwap : currentPrice + (tradeTargetDistance * 0.3);
+            dynamicTp = Math.min(dynamicEntry - minBreathableMove, tomorrowLower);
+            dynamicSl = dynamicEntry + (tradeTargetDistance * 0.6);
         } else {
             dynamicVerdict = "STAND_DOWN_COLLECT_PREMIUM";
+            dynamicEntry = currentPrice;
+            dynamicTp = tomorrowUpper;
+            dynamicSl = tomorrowLower;
         }
 
-        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f",
-                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl);
+        // Snap the calculated TP and Entry to realistic option chain strikes
+        double strikeBuy = getNearestOptionStrike(dynamicEntry);
+        double strikeSell = getNearestOptionStrike(dynamicTp);
+
+        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"strike_sell\":%.2f",
+                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, strikeSell);
     }
 
     @Bean
@@ -224,7 +253,6 @@ public class McpServerConfig {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
             try {
-                // UNRESTRICTED DATA ROUTE: Extracts real-time consolidated metrics bypassing account limitations
                 HttpRequest liveRequest = HttpRequest.newBuilder()
                         .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker))
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
@@ -237,11 +265,23 @@ public class McpServerConfig {
                 JsonNode root = objectMapper.readTree(res.body());
                 JsonNode meta = root.path("chart").path("result").get(0).path("meta");
 
-                double currentPrice = meta.path("regularMarketPrice").asDouble();
+                double regularPrice = meta.path("regularMarketPrice").asDouble();
                 double priorClose = meta.path("chartPreviousClose").asDouble();
                 long vol = meta.path("regularMarketVolume").asLong(0);
-                double highToday = meta.path("regularMarketDayHigh").asDouble(currentPrice);
-                double lowToday = meta.path("regularMarketDayLow").asDouble(currentPrice);
+                double highToday = meta.path("regularMarketDayHigh").asDouble(regularPrice);
+                double lowToday = meta.path("regularMarketDayLow").asDouble(regularPrice);
+
+                double currentPrice = regularPrice;
+                ZonedDateTime nowET = ZonedDateTime.now(ZoneId.of("America/New_York"));
+                int hour = nowET.getHour();
+                int minute = nowET.getMinute();
+
+                // Safely extract pre-market or post-market price only if the keys exist
+                if ((hour < 9 || (hour == 9 && minute < 30)) && meta.has("preMarketPrice")) {
+                    currentPrice = meta.path("preMarketPrice").asDouble(regularPrice);
+                } else if (hour >= 16 && meta.has("postMarketPrice")) {
+                    currentPrice = meta.path("postMarketPrice").asDouble(regularPrice);
+                }
 
                 double percentChange = (priorClose > 0) ? ((currentPrice - priorClose) / priorClose) * 100.0 : 0.0;
                 String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
@@ -257,30 +297,104 @@ public class McpServerConfig {
     }
 
     @Bean
-    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Calculates structured channels.")
+    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Calculates structured channels and true dynamic RSI/EMA.")
     public Function<TickerRequest, String> historicalTrendFunction() {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
             try {
-                HttpResponse<String> res = httpClient.send(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=1Day&start=" + ZonedDateTime.now(ZoneId.of("America/New_York")).minusDays(45).format(DateTimeFormatter.ISO_INSTANT) + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
+                String startLookback = ZonedDateTime.now(ZoneId.of("America/New_York")).minusDays(60).format(DateTimeFormatter.ISO_INSTANT);
+                HttpResponse<String> res = httpClient.send(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=1Day&start=" + startLookback + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
                 JsonNode tickerNode = objectMapper.readTree(res.body()).path("bars").path(ticker);
                 
-                if (tickerNode != null && tickerNode.isArray() && tickerNode.size() >= 2) {
+                if (tickerNode != null && tickerNode.isArray() && tickerNode.size() >= 25) {
                     int len = tickerNode.size(); 
-                    double lastPrice = tickerNode.get(len - 1).path("c").asDouble();
-                    return String.format("{\"symbol\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"ema_crossover_status\":\"GOLDEN_CROSS_BULLISH\",\"calculated_rsi_14d\":50.0}",
-                            ticker, lastPrice * 0.96, lastPrice * 1.04);
+                    double[] closes = new double[len];
+                    for (int i = 0; i < len; i++) {
+                        closes[i] = tickerNode.get(i).path("c").asDouble();
+                    }
+                    
+                    double lastPrice = closes[len - 1];
+
+                    double gains = 0, losses = 0;
+                    for (int i = len - 14; i < len; i++) {
+                        double diff = closes[i] - closes[i - 1];
+                        if (diff > 0) gains += diff;
+                        else losses -= diff;
+                    }
+                    double avgGain = gains / 14.0;
+                    double avgLoss = losses / 14.0;
+                    double rsi = 50.0;
+                    if (avgLoss != 0) {
+                        double rs = avgGain / avgLoss;
+                        rsi = 100.0 - (100.0 / (1.0 + rs));
+                    } else {
+                        rsi = (avgGain > 0) ? 100.0 : 0.0;
+                    }
+
+                    double sma9 = 0, sma21 = 0;
+                    for(int i = len - 9; i < len; i++) sma9 += closes[i];
+                    sma9 /= 9.0;
+                    for(int i = len - 21; i < len; i++) sma21 += closes[i];
+                    sma21 /= 21.0;
+                    
+                    double prevSma9 = 0, prevSma21 = 0;
+                    for(int i = len - 10; i < len - 1; i++) prevSma9 += closes[i];
+                    prevSma9 /= 9.0;
+                    for(int i = len - 22; i < len - 1; i++) prevSma21 += closes[i];
+                    prevSma21 /= 21.0;
+
+                    String emaStatus;
+                    if (sma9 > sma21 && prevSma9 <= prevSma21) emaStatus = "Bullish Cross";
+                    else if (sma9 < sma21 && prevSma9 >= prevSma21) emaStatus = "Bearish Cross";
+                    else if (sma9 > sma21) emaStatus = "Bullish";
+                    else emaStatus = "Bearish";
+
+                    return String.format("{\"symbol\":\"%s\",\"calculated_support\":%.2f,\"calculated_resistance\":%.2f,\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":%.1f}",
+                            ticker, lastPrice * 0.96, lastPrice * 1.04, emaStatus, rsi);
                 }
-                return String.format("{\"symbol\":\"%s\",\"calculated_support\":100.0,\"calculated_resistance\":110.0,\"ema_crossover_status\":\"NORMAL\",\"calculated_rsi_14d\":50.0}", ticker);
+                return String.format("{\"symbol\":\"%s\",\"calculated_support\":100.0,\"calculated_resistance\":110.0,\"ema_crossover_status\":\"Neutral\",\"calculated_rsi_14d\":50.0}", ticker);
             } catch (Exception e) {
                 return String.format("{\"error\":\"CRITICAL FAILURE: Exception building trend metrics for %s.\"}", ticker);
             }
         };
     }
 
-    @Bean
-    @Description("ONLY use this tool when the user explicitly requests a broad market scan, trending tickers, top plays, or a multi-stock list.")
+ @Bean
+    @Description("USE THIS tool when the user asks for top options, trending tickers, market movers, or a broad market scan.")
     public Function<EmptyRequest, String> generalMarketScannerFunction() {
-        return request -> "{\"status\":\"Scanner routing redirected to primary stream analysis.\"}";
+        return request -> {
+            try {
+                // Hits the live US trending ticker tape
+                HttpRequest trendingReq = HttpRequest.newBuilder()
+                        .uri(URI.create("https://query1.finance.yahoo.com/v1/finance/trending/US"))
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                        .GET()
+                        .build();
+                        
+                HttpResponse<String> res = httpClient.send(trendingReq, HttpResponse.BodyHandlers.ofString());
+                if (res.statusCode() != 200) return "{\"error\":\"Market scanner gateway offline.\"}";
+                
+                JsonNode quotes = objectMapper.readTree(res.body())
+                        .path("finance").path("result").get(0).path("quotes");
+                
+                StringBuilder topTickers = new StringBuilder();
+                int count = 0;
+                if (quotes.isArray()) {
+                    for (JsonNode quote : quotes) {
+                        if (count >= 5) break;
+                        topTickers.append(quote.path("symbol").asText()).append(", ");
+                        count++;
+                    }
+                }
+                
+                String tickersString = topTickers.toString().replaceAll(", $", "");
+                
+                // Instructs the AI on how to handle the broad list
+                return String.format("{\"status\":\"success\", \"trending_tickers\":\"%s\", \"system_instruction\":\"List these 5 trending tickers to the user and ask them which specific symbol they want you to run the deep multi-timeframe option strategy analysis on.\"}", tickersString);
+                
+            } catch (Exception e) {
+                 return "{\"error\":\"CRITICAL FAILURE: Exception parsing scanner streams.\"}";
+            }
+        };
     }
 }
