@@ -253,8 +253,9 @@ public class McpServerConfig {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
             try {
+                // NEW URL: Forces the public V8 API to load extended hours 1-minute candles
                 HttpRequest liveRequest = HttpRequest.newBuilder()
-                        .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker))
+                        .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                         .GET()
                         .build();
@@ -263,7 +264,8 @@ public class McpServerConfig {
                 if (res.statusCode() != 200) return String.format("{\"error\":\"CRITICAL FAILURE: Public Gateway Offline for %s.\"}", ticker);
 
                 JsonNode root = objectMapper.readTree(res.body());
-                JsonNode meta = root.path("chart").path("result").get(0).path("meta");
+                JsonNode resultNode = root.path("chart").path("result").get(0);
+                JsonNode meta = resultNode.path("meta");
 
                 double regularPrice = meta.path("regularMarketPrice").asDouble();
                 double priorClose = meta.path("chartPreviousClose").asDouble();
@@ -272,15 +274,17 @@ public class McpServerConfig {
                 double lowToday = meta.path("regularMarketDayLow").asDouble(regularPrice);
 
                 double currentPrice = regularPrice;
-                ZonedDateTime nowET = ZonedDateTime.now(ZoneId.of("America/New_York"));
-                int hour = nowET.getHour();
-                int minute = nowET.getMinute();
-
-                // Safely extract pre-market or post-market price only if the keys exist
-                if ((hour < 9 || (hour == 9 && minute < 30)) && meta.has("preMarketPrice")) {
-                    currentPrice = meta.path("preMarketPrice").asDouble(regularPrice);
-                } else if (hour >= 16 && meta.has("postMarketPrice")) {
-                    currentPrice = meta.path("postMarketPrice").asDouble(regularPrice);
+                
+                // BACKDOOR: Extract the absolute latest active price from the minute candles (Captures Pre/Post Market)
+                JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
+                if (closes != null && closes.isArray() && !closes.isEmpty()) {
+                    // Loop backwards from the end of the day to find the last non-null trade execution
+                    for (int i = closes.size() - 1; i >= 0; i--) {
+                        if (!closes.get(i).isNull()) {
+                            currentPrice = closes.get(i).asDouble();
+                            break;
+                        }
+                    }
                 }
 
                 double percentChange = (priorClose > 0) ? ((currentPrice - priorClose) / priorClose) * 100.0 : 0.0;
@@ -359,7 +363,7 @@ public class McpServerConfig {
         };
     }
 
- @Bean
+    @Bean
     @Description("USE THIS tool when the user asks for top options, trending tickers, market movers, or a broad market scan.")
     public Function<EmptyRequest, String> generalMarketScannerFunction() {
         return request -> {
