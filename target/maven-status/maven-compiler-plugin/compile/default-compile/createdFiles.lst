@@ -1,7 +1,13 @@
-com/quant/agent/McpServerConfig$TickerRequest.class
+com/quant/agent/MarketClockService.class
+com/quant/agent/AlpacaStreamService.class
+com/quant/agent/AlphaQuantAgentApplication.class
+com/quant/agent/AlpacaStreamService$AlpacaListener.class
+com/quant/agent/AlpacaStreamService$LiveQuote.class
+com/quant/agent/McpServerConfig$TrendRequest.class
 com/quant/agent/TradingAgentService.class
 com/quant/agent/TradingAgentController$ChatRequest.class
-com/quant/agent/AlphaQuantAgentApplication.class
+com/quant/agent/McpServerConfig$PriceRequest.class
 com/quant/agent/McpServerConfig$EmptyRequest.class
 com/quant/agent/TradingAgentController.class
 com/quant/agent/McpServerConfig.class
+com/quant/agent/MarketClockService$Session.class

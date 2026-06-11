@@ -11,11 +11,16 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.TemporalAdjusters;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
@@ -31,7 +36,17 @@ public class McpServerConfig {
     @Value("${alpaca.api.secret}")
     private String apiSecret;
 
-    public record TickerRequest(String symbol) {}
+    private final AlpacaStreamService alpacaStreamService;
+    private final MarketClockService marketClockService;
+
+    public McpServerConfig(AlpacaStreamService alpacaStreamService, MarketClockService marketClockService) {
+        this.alpacaStreamService = alpacaStreamService;
+        this.marketClockService = marketClockService;
+    }
+
+    // UPGRADE: Split schemas so the AI doesn't drop the custom parameters
+    public record PriceRequest(String symbol, Integer customTradingDays) {}
+    public record TrendRequest(String symbol) {}
     public record EmptyRequest() {}
 
     private HttpRequest buildAlpacaBaseRequest(String fullPath) {
@@ -48,20 +63,19 @@ public class McpServerConfig {
         return buildAlpacaBaseRequest("/v2/stocks" + endpoint);
     }
 
-    // Real-world options exchange increment rounding algorithm
     private double getNearestOptionStrike(double price) {
         if (price <= 50.0) {
-            return Math.round(price * 2.0) / 2.0; // $0.50 increments
+            return Math.round(price * 2.0) / 2.0; 
         } else if (price <= 200.0) {
-            return Math.round(price); // $1.00 increments
+            return Math.round(price); 
         } else if (price <= 500.0) {
-            return Math.round(price / 2.5) * 2.5; // $2.50 increments
+            return Math.round(price / 2.5) * 2.5; 
         } else {
-            return Math.round(price / 5.0) * 5.0; // $5.00 increments
+            return Math.round(price / 5.0) * 5.0; 
         }
     }
 
-    private String processIntradayMtfAlignment(String ticker, double currentPrice, double highToday, double lowToday, long totalVolume, double priorClose) throws Exception {
+    private String processIntradayMtfAlignment(String ticker, double currentPrice, double highToday, double lowToday, long totalVolume, double priorClose, int customDays) throws Exception {
         ZonedDateTime nowET = ZonedDateTime.now(ZoneId.of("America/New_York"));
         
         String lookback45Days = nowET.minusDays(45).format(DateTimeFormatter.ISO_INSTANT);
@@ -77,9 +91,7 @@ public class McpServerConfig {
         double microSupport = (lowToday > 0.0) ? lowToday : currentPrice * 0.99;
         double microResistance = (highToday > 0.0) ? highToday : currentPrice * 1.01;
 
-        int hour = nowET.getHour();
-        int minute = nowET.getMinute();
-        String sessionStatus = (hour < 9 || (hour == 9 && minute < 30)) ? "Pre-Market" : (hour >= 16 ? "Post-Market" : "Open Market");
+        String sessionStatus = marketClockService.toPlainEnglish();
 
         CompletableFuture<HttpResponse<String>> futureD1 = httpClient.sendAsync(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=1Day&start=" + lookback45Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureH1 = httpClient.sendAsync(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=1Hour&start=" + lookback10Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
@@ -148,7 +160,14 @@ public class McpServerConfig {
             vwap = currentPrice;
         }
 
-        double totalConfluenceScore = (dailyScore * 0.40) + (h1Score * 0.30) + (m15Score * 0.20) + (m5Score * 0.10);
+        double totalConfluenceScore;
+        if (customDays > 10) {
+            totalConfluenceScore = (dailyScore * 0.70) + (h1Score * 0.30);
+        } else if (customDays > 3) {
+            totalConfluenceScore = (dailyScore * 0.50) + (h1Score * 0.30) + (m15Score * 0.20);
+        } else {
+            totalConfluenceScore = (dailyScore * 0.40) + (h1Score * 0.30) + (m15Score * 0.20) + (m5Score * 0.10);
+        }
 
         double impliedVolatility = 0.0;
         if (futureOptions.get().statusCode() == 200) {
@@ -183,14 +202,16 @@ public class McpServerConfig {
             impliedVolatility = Math.min(impliedVolatility, 0.80);
         }
 
-        // 1. VOLATILITY DEFLATOR: Strip out the 15% market maker fear premium
         double realizedVolEstimate = impliedVolatility * 0.85;
 
-        // 2. TIME CONVERSION: Use 252 trading days instead of 365 calendar days for intraday accuracy
         double oneDayExpectedMove = currentPrice * realizedVolEstimate * Math.sqrt(1.0 / 252.0);
         double fiveDayExpectedMove = currentPrice * realizedVolEstimate * Math.sqrt(5.0 / 252.0);
 
-        // 3. DIRECTIONAL SKEW: Shift the center anchor based on the day's trend momentum
+        double customExpectedMove = 0.0;
+        if (customDays > 0) {
+            customExpectedMove = currentPrice * realizedVolEstimate * Math.sqrt(customDays / 252.0);
+        }
+
         double rangeAnchor = currentPrice;
         if (totalConfluenceScore <= -40.0) {
             rangeAnchor = currentPrice - (oneDayExpectedMove * 0.35); 
@@ -202,10 +223,15 @@ public class McpServerConfig {
         double tomorrowLower = rangeAnchor - oneDayExpectedMove;
         double nextWeekUpper = rangeAnchor + fiveDayExpectedMove;
         double nextWeekLower = rangeAnchor - fiveDayExpectedMove;
+        
+        double customUpper = (customDays > 0) ? rangeAnchor + customExpectedMove : 0.0;
+        double customLower = (customDays > 0) ? rangeAnchor - customExpectedMove : 0.0;
 
-        // --- SYNCHRONIZED RISK LIMITS ---
+        double activeExpectedMove = (customDays > 0) ? customExpectedMove : oneDayExpectedMove;
         double minBreathableMove = currentPrice * 0.015; 
-        double tradeTargetDistance = Math.max(oneDayExpectedMove, minBreathableMove);
+        double tradeTargetDistance = Math.max(activeExpectedMove, minBreathableMove);
+        double activeUpperBracket = (customDays > 0) ? customUpper : tomorrowUpper;
+        double activeLowerBracket = (customDays > 0) ? customLower : tomorrowLower;
 
         double dynamicEntry = currentPrice;
         double dynamicSl = currentPrice;
@@ -215,45 +241,106 @@ public class McpServerConfig {
         if (totalConfluenceScore >= 70.0) {
             dynamicVerdict = "EXECUTE_CALL_OR_LONG_SPREAD";
             dynamicEntry = currentPrice;
-            dynamicTp = Math.max(currentPrice + minBreathableMove, tomorrowUpper);
-            dynamicSl = Math.max(currentPrice - minBreathableMove, tomorrowLower);
+            dynamicTp = Math.max(currentPrice + tradeTargetDistance, activeUpperBracket);
+            dynamicSl = Math.max(currentPrice - tradeTargetDistance, activeLowerBracket);
         } else if (totalConfluenceScore >= 15.0) {
             dynamicVerdict = "PREPARE_LONG_BUY_DIP_AT_VWAP";
-            dynamicEntry = (vwap < currentPrice) ? vwap : currentPrice - (tradeTargetDistance * 0.3);
-            dynamicTp = Math.max(dynamicEntry + minBreathableMove, tomorrowUpper);
-            dynamicSl = dynamicEntry - (tradeTargetDistance * 0.6);
+            dynamicEntry = (vwap < currentPrice && customDays <= 5) ? vwap : currentPrice - (tradeTargetDistance * 0.2);
+            dynamicTp = Math.max(dynamicEntry + tradeTargetDistance, activeUpperBracket);
+            dynamicSl = dynamicEntry - (tradeTargetDistance * 0.5);
         } else if (totalConfluenceScore <= -70.0) {
             dynamicVerdict = "EXECUTE_PUT_OR_SHORT_SPREAD";
             dynamicEntry = currentPrice;
-            dynamicTp = Math.min(currentPrice - minBreathableMove, tomorrowLower);
-            dynamicSl = Math.min(currentPrice + minBreathableMove, tomorrowUpper);
+            dynamicTp = Math.min(currentPrice - tradeTargetDistance, activeLowerBracket);
+            dynamicSl = Math.min(currentPrice + tradeTargetDistance, activeUpperBracket);
         } else if (totalConfluenceScore <= -15.0) {
             dynamicVerdict = "PREPARE_SHORT_FADE_BOUNCE_AT_VWAP";
-            dynamicEntry = (vwap > currentPrice) ? vwap : currentPrice + (tradeTargetDistance * 0.3);
-            dynamicTp = Math.min(dynamicEntry - minBreathableMove, tomorrowLower);
-            dynamicSl = dynamicEntry + (tradeTargetDistance * 0.6);
+            dynamicEntry = (vwap > currentPrice && customDays <= 5) ? vwap : currentPrice + (tradeTargetDistance * 0.2);
+            dynamicTp = Math.min(dynamicEntry - tradeTargetDistance, activeLowerBracket);
+            dynamicSl = dynamicEntry + (tradeTargetDistance * 0.5);
         } else {
             dynamicVerdict = "STAND_DOWN_COLLECT_PREMIUM";
             dynamicEntry = currentPrice;
-            dynamicTp = tomorrowUpper;
-            dynamicSl = tomorrowLower;
+            dynamicTp = activeUpperBracket;
+            dynamicSl = activeLowerBracket;
         }
 
-        // Snap the calculated TP and Entry to realistic option chain strikes
         double strikeBuy = getNearestOptionStrike(dynamicEntry);
         double strikeSell = getNearestOptionStrike(dynamicTp);
 
-        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"strike_sell\":%.2f",
-                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, strikeSell);
+        int calendarDaysToAdd = customDays > 0 ? (int)(customDays * 1.45) : 0;
+        LocalDate today = nowET.toLocalDate();
+        LocalDate expDate = today.plusDays(calendarDaysToAdd);
+        if (customDays == 0 || expDate.getDayOfWeek() != DayOfWeek.FRIDAY) {
+            expDate = expDate.with(TemporalAdjusters.nextOrSame(DayOfWeek.FRIDAY));
+        }
+        String targetExpiration = expDate.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
+
+        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"custom_upper\":%.2f,\"custom_lower\":%.2f,\"custom_days\":%d,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"strike_sell\":%.2f,\"target_expiration\":\"%s\"",
+                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, strikeSell, targetExpiration);
+    }
+
+    // Fetches Yahoo + full MTF analysis for one ticker — shared by both stockPriceFunction and the scanner.
+    private String scanTicker(String ticker) {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .GET()
+                    .build();
+            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() != 200) return null;
+
+            JsonNode root       = objectMapper.readTree(res.body());
+            JsonNode resultNode = root.path("chart").path("result").get(0);
+            if (resultNode == null || resultNode.isMissingNode()) return null;
+            JsonNode meta = resultNode.path("meta");
+
+            double regularPrice = meta.path("regularMarketPrice").asDouble();
+            double priorClose   = meta.path("chartPreviousClose").asDouble();
+            long   vol          = meta.path("regularMarketVolume").asLong(0);
+            double highToday    = meta.path("regularMarketDayHigh").asDouble(regularPrice);
+            double lowToday     = meta.path("regularMarketDayLow").asDouble(regularPrice);
+
+            double currentPrice = regularPrice;
+            JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
+            if (closes != null && closes.isArray() && !closes.isEmpty()) {
+                for (int i = closes.size() - 1; i >= 0; i--) {
+                    if (!closes.get(i).isNull()) { currentPrice = closes.get(i).asDouble(); break; }
+                }
+            }
+
+            currentPrice = alpacaStreamService.getLatestQuote(ticker)
+                    .map(AlpacaStreamService.LiveQuote::price)
+                    .filter(p -> p > 0)
+                    .orElse(currentPrice);
+
+            if (currentPrice <= 0) return null;
+
+            double percentChange = (priorClose > 0) ? ((currentPrice - priorClose) / priorClose) * 100.0 : 0.0;
+            String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
+
+            String mtf  = processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, 0);
+            String base = String.format("{\"symbol\":\"%s\",\"current_price\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\"}",
+                    ticker, currentPrice, pctString, String.format("%,d", vol));
+            // mtf starts with a comma — strip the closing brace from base and append
+            return base.substring(0, base.length() - 1) + mtf + "}";
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     @Bean
-    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Gets current real-time market pricing data.")
-    public Function<TickerRequest, String> stockPriceFunction() {
+    @Description("USE THIS tool to fetch market data. CRITICAL: If the user asks for a specific timeframe (e.g. 'in 4 weeks', '3 months'), you MUST pass the equivalent trading days into 'customTradingDays' (1 week=5, 4 weeks=20, 3 months=63).")
+    public Function<PriceRequest, String> stockPriceFunction() {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
+            int customDays = request.customTradingDays() != null ? request.customTradingDays() : 0;
+
+            // Ensure this ticker is being tracked by the WebSocket stream
+            alpacaStreamService.subscribe(ticker);
+
             try {
-                // NEW URL: Forces the public V8 API to load extended hours 1-minute candles
                 HttpRequest liveRequest = HttpRequest.newBuilder()
                         .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
@@ -273,12 +360,11 @@ public class McpServerConfig {
                 double highToday = meta.path("regularMarketDayHigh").asDouble(regularPrice);
                 double lowToday = meta.path("regularMarketDayLow").asDouble(regularPrice);
 
+                // Seed from Yahoo meta; then refine from the 1-minute bar array (includes pre/post hours)
                 double currentPrice = regularPrice;
-                
-                // BACKDOOR: Extract the absolute latest active price from the minute candles (Captures Pre/Post Market)
+
                 JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
                 if (closes != null && closes.isArray() && !closes.isEmpty()) {
-                    // Loop backwards from the end of the day to find the last non-null trade execution
                     for (int i = closes.size() - 1; i >= 0; i--) {
                         if (!closes.get(i).isNull()) {
                             currentPrice = closes.get(i).asDouble();
@@ -287,13 +373,19 @@ public class McpServerConfig {
                     }
                 }
 
+                // If the WebSocket stream has a fresher quote (< 30 s old), use it as the price
+                currentPrice = alpacaStreamService.getLatestQuote(ticker)
+                        .map(AlpacaStreamService.LiveQuote::price)
+                        .filter(p -> p > 0)
+                        .orElse(currentPrice);
+
                 double percentChange = (priorClose > 0) ? ((currentPrice - priorClose) / priorClose) * 100.0 : 0.0;
                 String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
 
                 String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\",\"high_today\":%.2f,\"low_today\":%.2f}",
                         ticker, ticker, currentPrice, currentPrice - priorClose, pctString, String.format("%,d", vol), highToday, lowToday);
                 
-                return payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose) + "}";
+                return payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, customDays) + "}";
             } catch (Exception e) {
                 return String.format("{\"error\":\"CRITICAL FAILURE: Exception parsing data streams for %s.\"}", ticker);
             }
@@ -301,8 +393,8 @@ public class McpServerConfig {
     }
 
     @Bean
-    @Description("USE THIS tool when the user asks to analyze an individual stock ticker symbol. Calculates structured channels and true dynamic RSI/EMA.")
-    public Function<TickerRequest, String> historicalTrendFunction() {
+    @Description("USE THIS tool to get historical trend data, RSI, and EMA crossover status. Requires only the ticker symbol.")
+    public Function<TrendRequest, String> historicalTrendFunction() {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
             try {
@@ -364,40 +456,62 @@ public class McpServerConfig {
     }
 
     @Bean
-    @Description("USE THIS tool when the user asks for top options, trending tickers, market movers, or a broad market scan.")
+    @Description("USE THIS tool when the user asks for top options plays, trending tickers, market movers, or a broad market scan. Returns full multi-timeframe analysis and options levels for the top 5 trending US stocks — render results as a table.")
     public Function<EmptyRequest, String> generalMarketScannerFunction() {
         return request -> {
             try {
-                // Hits the live US trending ticker tape
+                // 1. Fetch trending tickers
                 HttpRequest trendingReq = HttpRequest.newBuilder()
                         .uri(URI.create("https://query1.finance.yahoo.com/v1/finance/trending/US"))
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                         .GET()
                         .build();
-                        
                 HttpResponse<String> res = httpClient.send(trendingReq, HttpResponse.BodyHandlers.ofString());
                 if (res.statusCode() != 200) return "{\"error\":\"Market scanner gateway offline.\"}";
-                
+
                 JsonNode quotes = objectMapper.readTree(res.body())
                         .path("finance").path("result").get(0).path("quotes");
-                
-                StringBuilder topTickers = new StringBuilder();
-                int count = 0;
+
+                List<String> tickers = new ArrayList<>();
                 if (quotes.isArray()) {
-                    for (JsonNode quote : quotes) {
-                        if (count >= 5) break;
-                        topTickers.append(quote.path("symbol").asText()).append(", ");
-                        count++;
+                    for (JsonNode q : quotes) {
+                        if (tickers.size() >= 5) break;
+                        String sym = q.path("symbol").asText().trim();
+                        // Skip crypto pairs and foreign-listed symbols
+                        if (!sym.isBlank() && !sym.contains("-") && !sym.contains(".")) {
+                            tickers.add(sym);
+                            alpacaStreamService.subscribe(sym);
+                        }
                     }
                 }
-                
-                String tickersString = topTickers.toString().replaceAll(", $", "");
-                
-                // Instructs the AI on how to handle the broad list
-                return String.format("{\"status\":\"success\", \"trending_tickers\":\"%s\", \"system_instruction\":\"List these 5 trending tickers to the user and ask them which specific symbol they want you to run the deep multi-timeframe option strategy analysis on.\"}", tickersString);
-                
+
+                if (tickers.isEmpty()) return "{\"error\":\"No eligible trending tickers found.\"}";
+
+                // 2. Run full MTF analysis for each ticker concurrently
+                List<CompletableFuture<String>> futures = new ArrayList<>();
+                for (String ticker : tickers) {
+                    futures.add(CompletableFuture.supplyAsync(() -> scanTicker(ticker)));
+                }
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+                // 3. Aggregate into JSON array, skipping any failed tickers
+                StringBuilder array = new StringBuilder("[");
+                boolean first = true;
+                for (CompletableFuture<String> f : futures) {
+                    String result = f.join();
+                    if (result != null) {
+                        if (!first) array.append(",");
+                        array.append(result);
+                        first = false;
+                    }
+                }
+                array.append("]");
+
+                return String.format("{\"status\":\"success\",\"ticker_count\":%d,\"scan_results\":%s}",
+                        tickers.size(), array);
+
             } catch (Exception e) {
-                 return "{\"error\":\"CRITICAL FAILURE: Exception parsing scanner streams.\"}";
+                return "{\"error\":\"CRITICAL FAILURE: Exception parsing scanner streams.\"}";
             }
         };
     }
