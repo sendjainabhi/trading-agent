@@ -195,6 +195,35 @@
         
         .loading-text { color: #6c757d; font-style: italic; font-size: 0.95rem; }
         .error-text { color: #dc3545; font-weight: 500; font-size: 0.95rem; }
+
+        .suggestion-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 10px 20px 0;
+            background-color: var(--bg-chat);
+        }
+
+        .chip {
+            background-color: transparent;
+            color: var(--primary-blue);
+            border: 1px solid #ced4da;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+            white-space: nowrap;
+        }
+
+        .chip:hover:not(:disabled) {
+            background-color: var(--secondary-blue);
+            border-color: var(--secondary-blue);
+            color: #fff;
+        }
+
+        .chip:disabled { opacity: 0.45; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -211,13 +240,31 @@
         </div>
     </div>
 
+    <div class="suggestion-chips" id="chipBar">
+        <button class="chip" onclick="submitChip('pre market movers')">🌅 Pre-Market Movers</button>
+        <button class="chip" onclick="submitChip('scan the market and show top options plays')">📊 Market Scan</button>
+        <button class="chip" onclick="submitChip('what are the biggest bullish movers today?')">📈 Bullish Movers</button>
+        <button class="chip" onclick="submitChip('what are the biggest bearish movers today?')">📉 Bearish Movers</button>
+        <button class="chip" onclick="submitChip('what stocks are gapping up or down right now?')">⚡ Gap Plays</button>
+        <button class="chip" onclick="submitChip('what are the most active stocks with high volume?')">🔥 Most Active</button>
+    </div>
     <div class="control-panel">
-        <input type="text" id="commandInput" placeholder="Message AlphaQuant (e.g., 'Get the live price for AVGO...')" onkeydown="if(event.key === 'Enter') dispatchCommand()">
+        <input type="text" id="commandInput" placeholder="Ask AlphaQuant — e.g. 'analyze NVDA', 'pre-market movers', 'scan market'" onkeydown="if(event.key === 'Enter') dispatchCommand()">
         <button id="sendButton" onclick="dispatchCommand()">Send</button>
     </div>
 </div>
 
 <script>
+    function submitChip(text) {
+        const inputElement = document.getElementById('commandInput');
+        inputElement.value = text;
+        dispatchCommand();
+    }
+
+    function setChipsDisabled(disabled) {
+        document.querySelectorAll('.chip').forEach(c => c.disabled = disabled);
+    }
+
     async function dispatchCommand() {
         const inputElement = document.getElementById('commandInput');
         const sendButton = document.getElementById('sendButton');
@@ -227,6 +274,7 @@
         inputElement.value = '';
         inputElement.disabled = true;
         sendButton.disabled = true;
+        setChipsDisabled(true);
 
         const chatWindow = document.getElementById('chat-window');
 
@@ -289,6 +337,7 @@
         } finally {
             inputElement.disabled = false;
             sendButton.disabled = false;
+            setChipsDisabled(false);
             inputElement.focus();
         }
     }
