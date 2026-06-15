@@ -162,8 +162,14 @@
             gap: 12px;
         }
 
-        input[type="text"] {
+        .input-wrapper {
             flex-grow: 1;
+            position: relative;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            box-sizing: border-box;
             padding: 14px 20px;
             border: 1px solid #ced4da;
             border-radius: 30px;
@@ -181,6 +187,52 @@
         input[type="text"]:disabled {
             background-color: #f8f9fa;
             cursor: not-allowed;
+        }
+
+        .suggestions-dropdown {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 0;
+            right: 0;
+            background: #fff;
+            border: 1px solid #ced4da;
+            border-radius: 14px;
+            box-shadow: 0 -6px 24px rgba(0,0,0,0.11);
+            z-index: 200;
+            overflow: hidden;
+        }
+
+        .suggestion-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 18px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border-light);
+            transition: background 0.1s;
+        }
+
+        .suggestion-item:last-child { border-bottom: none; }
+
+        .suggestion-item:hover,
+        .suggestion-item.sug-active { background: #f0f5ff; }
+
+        .sug-ticker {
+            font-weight: 700;
+            font-size: 0.84rem;
+            color: var(--primary-blue);
+            min-width: 52px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            letter-spacing: 0.04em;
+        }
+
+        .sug-name {
+            font-size: 0.83rem;
+            color: #666;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         button {
@@ -314,7 +366,10 @@
         <button class="chip" onclick="submitChip('what are the most active stocks with high volume?')">🔥 Most Active</button>
     </div>
     <div class="control-panel">
-        <input type="text" id="commandInput" placeholder="Ask AlphaQuant — e.g. 'analyze NVDA', 'pre-market movers', 'scan market'" onkeydown="if(event.key === 'Enter') dispatchCommand()">
+        <div class="input-wrapper">
+            <input type="text" id="commandInput" placeholder="Ask AlphaQuant — e.g. 'analyze NVDA', 'pre-market movers', 'scan market'" oninput="handleInputChange(this.value)" onkeydown="handleInputKeydown(event)" onblur="setTimeout(hideSuggestions, 160)">
+            <div id="suggestions" class="suggestions-dropdown"></div>
+        </div>
         <button id="sendButton" onclick="dispatchCommand()">Send</button>
     </div>
 </div>
@@ -549,9 +604,89 @@
         } catch (e) { /* silent: stale price stays visible */ }
     }
 
+    // ── Autocomplete ──────────────────────────────────────────────────────────
+    let selectedSuggestionIdx = -1;
+    let suggestDebounceTimer  = null;
+
+    function getLastToken(text) {
+        const m = text.match(/(\S+)$/);
+        return m ? m[1] : '';
+    }
+
+    async function handleInputChange(value) {
+        const term = getLastToken(value);
+        if (term.length < 2) { hideSuggestions(); return; }
+        clearTimeout(suggestDebounceTimer);
+        suggestDebounceTimer = setTimeout(async () => {
+            try {
+                const res = await fetch(`/api/search?q=${encodeURIComponent(term)}`);
+                if (!res.ok) return;
+                const items = await res.json();
+                showSuggestions(items.map(i => [i.symbol, i.name]));
+            } catch (e) { /* autocomplete is optional — never block the user */ }
+        }, 280);
+    }
+
+    function showSuggestions(items) {
+        const box = document.getElementById('suggestions');
+        if (!items.length) { hideSuggestions(); return; }
+        selectedSuggestionIdx = -1;
+        box.innerHTML = items.map(([sym, name]) =>
+            `<div class="suggestion-item" data-sym="${sym}" onmousedown="event.preventDefault();pickSuggestion('${sym}')">` +
+            `<span class="sug-ticker">${sym}</span><span class="sug-name">${name}</span></div>`
+        ).join('');
+        box.style.display = 'block';
+    }
+
+    function hideSuggestions() {
+        const box = document.getElementById('suggestions');
+        if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+        selectedSuggestionIdx = -1;
+    }
+
+    function pickSuggestion(symbol) {
+        const inputEl = document.getElementById('commandInput');
+        const val   = inputEl.value;
+        const token = getLastToken(val);
+        inputEl.value = token ? val.slice(0, val.length - token.length) + symbol : symbol;
+        hideSuggestions();
+        inputEl.focus();
+    }
+
+    function navigateSuggestions(dir) {
+        const box   = document.getElementById('suggestions');
+        const items = box.querySelectorAll('.suggestion-item');
+        if (!items.length) return;
+        if (selectedSuggestionIdx >= 0) items[selectedSuggestionIdx].classList.remove('sug-active');
+        selectedSuggestionIdx += dir;
+        if (selectedSuggestionIdx < -1)            selectedSuggestionIdx = items.length - 1;
+        if (selectedSuggestionIdx >= items.length) selectedSuggestionIdx = -1;
+        if (selectedSuggestionIdx >= 0) {
+            items[selectedSuggestionIdx].classList.add('sug-active');
+            items[selectedSuggestionIdx].scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    function handleInputKeydown(event) {
+        const box    = document.getElementById('suggestions');
+        const isOpen = box && box.style.display === 'block';
+        if (event.key === 'ArrowDown') { if (isOpen) { event.preventDefault(); navigateSuggestions(1);  } return; }
+        if (event.key === 'ArrowUp')   { if (isOpen) { event.preventDefault(); navigateSuggestions(-1); } return; }
+        if (event.key === 'Escape')    { hideSuggestions(); return; }
+        if (event.key === 'Enter') {
+            if (isOpen && selectedSuggestionIdx >= 0) {
+                event.preventDefault();
+                pickSuggestion(box.querySelectorAll('.suggestion-item')[selectedSuggestionIdx].dataset.sym);
+            } else {
+                dispatchCommand();
+            }
+        }
+    }
+
     // ── Chip helpers ─────────────────────────────────────────────────────────
     function submitChip(text) {
         document.getElementById('commandInput').value = text;
+        hideSuggestions();
         dispatchCommand();
     }
 
@@ -566,6 +701,7 @@
         const rawText  = inputEl.value.trim();
         if (!rawText) return;
 
+        hideSuggestions();
         if (activeAbortController) activeAbortController.abort();
         activeAbortController = new AbortController();
 

@@ -16,6 +16,11 @@ import java.time.Duration;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @CrossOrigin(origins = "*", allowedHeaders = "*")
@@ -102,5 +107,34 @@ public class TradingAgentController {
             log.warn("Price refresh failed for {}: {}", sym, e.getMessage());
         }
         return new PriceResponse(sym, 0.0, 0.0, 0.0, "--:--:--", "error");
+    }
+
+    @GetMapping("/api/search")
+    public List<Map<String, String>> searchSymbols(@RequestParam String q) {
+        try {
+            String encoded = URLEncoder.encode(q.trim(), StandardCharsets.UTF_8);
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create("https://query1.finance.yahoo.com/v1/finance/search?q=" + encoded
+                            + "&lang=en-US&region=US&quotesCount=8&newsCount=0"))
+                    .header("User-Agent", "Mozilla/5.0")
+                    .timeout(Duration.ofSeconds(3))
+                    .GET().build();
+            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() != 200) return List.of();
+            JsonNode quotes = objectMapper.readTree(res.body()).path("quotes");
+            List<Map<String, String>> result = new ArrayList<>();
+            for (JsonNode item : quotes) {
+                String type = item.path("quoteType").asText("");
+                String sym  = item.path("symbol").asText("").trim();
+                if ((!type.equals("EQUITY") && !type.equals("ETF")) || sym.isBlank() || sym.contains(".")) continue;
+                String name = item.path("shortname").asText(item.path("longname").asText(sym));
+                result.add(Map.of("symbol", sym, "name", name));
+                if (result.size() >= 7) break;
+            }
+            return result;
+        } catch (Exception e) {
+            log.warn("Symbol search failed for '{}': {}", q, e.getMessage());
+            return List.of();
+        }
     }
 }
