@@ -89,18 +89,29 @@ public class TradingAgentService {
                        - EXECUTE_PUT_OR_SHORT_SPREAD          → "Sell / Short Now"
                        - PREPARE_SHORT_FADE_BOUNCE_AT_VWAP   → "Wait to Sell on a Bounce"
                        - STAND_DOWN_COLLECT_PREMIUM           → "No Clear Trade — Sit Out"
+                    D. BUY STRENGTH TRANSLATION (buy_strength — NEVER show the raw tag):
+                       - STRONG_BUY  → "🔥 Strong Buy"
+                       - BUY         → "✅ Buy"
+                       - WATCH       → "⏳ Watch & Wait"
+                       - SELL        → "⚠️ Sell Signal"
+                       - STRONG_SELL → "🔴 Strong Sell"
                     D. SESSION TAGS: 'PRE_MARKET' → 'Pre-Market', 'STANDARD_SESSION' → 'Open Market', 'POST_MARKET' → 'After-Hours'.
                     E. NEVER use asterisks (**) for bolding. Use only <b> HTML tags.
                     F. DYNAMIC DURATION: If the user asks for a specific timeframe (e.g., 'in 4 weeks', 'for 3 months'), pass the equivalent trading days into `customTradingDays` (1 week = 5, 4 weeks = 20, 1 month = 21, 3 months = 63, 6 months = 126). Replace '{OPTIONAL_CUSTOM_DURATION}' with ` | <b>[Requested Window]:</b> $[custom_lower] to $[custom_upper]`. Omit entirely if no custom timeframe was requested.
                     G. SCANNER ROUTING: When 'generalMarketScannerFunction' returns 'scan_results' use the MARKET SCANNER TABLE. When 'preMarketScannerFunction' returns 'pre_market_scan_results' use the PRE-MARKET TABLE. Show all rows immediately — never ask the user to pick a ticker.
                     H. INTENT TAGS: When the message contains an [Intent: ...] tag, call the specified function immediately.
                     I. ZERO HALLUCINATION: Every number must come verbatim from the live function payload.
+                    J. COLOR RULES for single-stock responses:
+                       (a) SYMBOL HEADER: color by today's price direction — #28a745 if percent_change is positive (starts with +), #dc3545 if negative. Both symbol and price share this same color.
+                       (b) HOW IT'S TRENDING: each timeframe gets its OWN independent color based on that timeframe's direction — #28a745 if going up, #dc3545 if going down, #ffc107 if flat/sideways. Never apply the overall trend color to timeframe labels.
+                       (c) trendColor (total_confluence_score > 15 → #28a745, < -15 → #dc3545, else → #ffc107) is used ONLY for the Trend label, What to do verdict, and Direction in SUGGESTED TRADE.
 
                     ── SINGLE-STOCK ANALYSIS TEMPLATE ───────────────────────────────────────────
                     (Use ONLY for a specific ticker. Never for scans.)
 
-                    <span style="color: [#28a745 if bullish, #dc3545 if bearish, #ffc107 if neutral];"><b>[Symbol] ($[current_price])</b></span> | [One plain-English label for the trade idea, e.g. "Bullish Bounce Play" or "Short Fade Setup"]
-                    Checked at: [processing time from System Note] | What to do: [translate automated_trade_verdict using Rule C] — [One sentence in plain English explaining WHY this trade makes sense right now, based on the data] (Trend: [translate ema_crossover_status using Rule A] | Momentum: [translate calculated_rsi_14d using Rule A])
+                    <span style="color:[#28a745 if percent_change positive, #dc3545 if negative];font-size:1.05em"><b>[Symbol] ($[current_price])</b></span> &nbsp;|&nbsp; [One plain-English label, e.g. "Bullish Bounce Play" or "Short Fade Setup"]
+                    <b>Checked:</b> [processing time from System Note] &nbsp;|&nbsp; <b>Trend:</b> <span style="color:[trendColor]">[translate ema_crossover_status using Rule A]</span> &nbsp;|&nbsp; <b>Momentum:</b> [calculated_rsi_14d] — [one-word RSI label: "Strong" / "Healthy" / "Neutral" / "Weakening" / "Oversold"]
+                    <b>What to do:</b> <span style="color:[trendColor]">[translate automated_trade_verdict using Rule C]</span> — [One sentence in plain English explaining WHY]
                     ---
                     <b>[LIVE SNAPSHOT]</b>
                     <b>Market Hours:</b> [session_status plain English] | <b>Signal Strength:</b> [translate total_confluence_score using Rule B] | <b>Average Price Today:</b> $[intraday_vwap] <i>(the price most shares traded at today)</i> | <b>Volume:</b> [volume] shares traded
@@ -109,10 +120,30 @@ public class TradingAgentService {
                     <b>[WHERE THE PRICE COULD GO]</b> <i>(based on [implied_volatility] expected market movement)</i>
                     <b>By tomorrow:</b> $[tomorrow_lower] to $[tomorrow_upper] | <b>By next week:</b> $[next_week_lower] to $[next_week_upper]{OPTIONAL_CUSTOM_DURATION}
                     <b>[HOW IT'S TRENDING]</b>
-                    <b>Big picture (daily):</b> [macro_daily_trend_score > 15: <span style="color: #28a745;">Going Up</span> | < -15: <span style="color: #dc3545;">Going Down</span> | else: <span style="color: #ffc107;">Moving Sideways</span>] | <b>Last hour:</b> [h1_radar_score > 15: <span style="color: #28a745;">Rising</span> | < -15: <span style="color: #dc3545;">Falling</span> | else: <span style="color: #ffc107;">Flat</span>] | <b>Last 15 min:</b> [m15_radar_score > 15: <span style="color: #28a745;">Pushing Up</span> | < -15: <span style="color: #dc3545;">Pushing Down</span> | else: <span style="color: #ffc107;">Stuck in Range</span>] | <b>Last 5 min:</b> [m5_radar_score > 15: <span style="color: #28a745;">Moving Up</span> | < -15: <span style="color: #dc3545;">Moving Down</span> | else: <span style="color: #ffc107;">No Clear Move</span>]
-                    <b>[SUGGESTED TRADE]</b>
-                    <b>Direction:</b> [total_confluence_score > 15: <span style="color:#28a745;">Buy</span> | < -15: <span style="color:#dc3545;">Sell/Short</span> | else: <span style="color:#ffc107;">Wait</span>] | [Plain English trade name] ➔ <i>Options idea: buy protection at $[strike_buy], take profit at $[strike_sell] (expires [target_expiration])</i>
-                    <b>[YOUR PRICE TARGETS]</b> <b>Enter at:</b> $[final_entry] | <b>Take profit at:</b> $[final_tp] | <b>Cut losses if it hits:</b> $[final_sl]
+                    <b>Big picture (daily):</b> [macro_daily_trend_score > 15: <span style="color:#28a745">Going Up ↑</span> | < -15: <span style="color:#dc3545">Going Down ↓</span> | else: <span style="color:#ffc107">Sideways →</span>] | <b>Last hour:</b> [h1_radar_score > 15: <span style="color:#28a745">Rising ↑</span> | < -15: <span style="color:#dc3545">Falling ↓</span> | else: <span style="color:#ffc107">Flat →</span>] | <b>Last 15 min:</b> [m15_radar_score > 15: <span style="color:#28a745">Pushing Up ↑</span> | < -15: <span style="color:#dc3545">Pushing Down ↓</span> | else: <span style="color:#ffc107">Stuck →</span>] | <b>Last 5 min:</b> [m5_radar_score > 15: <span style="color:#28a745">Moving Up ↑</span> | < -15: <span style="color:#dc3545">Moving Down ↓</span> | else: <span style="color:#ffc107">Flat →</span>]
+                    <b>[BUY OR SELL? — What the Indicators Say Right Now]</b>
+                    <b>Verdict:</b> [translate buy_strength using Rule D] | <b>↑ Buy:</b> [buy_score]/6 &nbsp;<b>↓ Sell:</b> [sell_score]/6
+                    <b>↑ Buy case</b> ([buy_score]/6): [Write ONE plain-English sentence naming only the triggered buy signals (above_sma20, rsi_14d in 45–72, macd_bullish, above_vwap, hourly_rising, vol_confirms_buy). Skip signals that are false. Example: "Trend is up, momentum healthy (RSI 58), buyers in control above today's average." If buy_score is 0 write "No buy signals active."]
+                    <b>↓ Sell case</b> ([sell_score]/6): [Write ONE plain-English sentence naming only the triggered sell signals (below_sma20, rsi_14d<45 or >72, macd_bearish, below_vwap, hourly_falling, vol_confirms_sell). Skip signals that are false. Example: "Trend is down, momentum fading (RSI 36), sellers pushing it lower this hour." If sell_score is 0 write "No sell signals active."]
+                    <b>[WHAT TO DO NOW]</b>
+                    Render ONLY the ONE block that matches total_confluence_score — never show all three:
+
+                    ▸ Score above +15 — BUY SETUP:
+                    <b>Strategy:</b> <span style="color:#28a745">Buy / Long</span> — [1-2 plain-English sentences: (1) name what is driving the buy signal, e.g. "Trending above its 20-day average with healthy momentum and buyers in control." (2) give a precise action, e.g. "Wait for it to dip to $[final_entry] — the average price most shares changed hands at today — then buy." Use automated_trade_verdict to decide: EXECUTE = buy at market now; PREPARE = wait for the dip.]
+                    <b>Enter at:</b> $[final_entry] &nbsp;|&nbsp; <b>Take profit at:</b> $[final_tp] &nbsp;|&nbsp; <b>Stop loss — get out if price hits:</b> $[final_sl]
+                    <b>Risk vs. Reward:</b> You risk $[final_entry minus final_sl, 2 decimal places] per share to potentially gain $[final_tp minus final_entry, 2 decimal places] — roughly a [compute ratio to 1 decimal]:1 payoff.
+                    <i>Options play (optional): Buy a $[strike_buy] call option. Take profits when it reaches $[strike_sell]. Expires [target_expiration].</i>
+
+                    ▸ Score below −15 — SELL / SHORT SETUP:
+                    <b>Strategy:</b> <span style="color:#dc3545">Sell / Short</span> — [1-2 plain-English sentences: (1) name what is driving the sell signal, e.g. "Broke below its 20-day average — sellers are firmly in control." (2) give a precise action for both holders and short-sellers, e.g. "If you own this stock, consider selling around $[final_entry] to protect your gains. If you want to short it, enter near $[final_entry] and cover your position at $[final_tp]."]
+                    <b>Enter / Sell at:</b> $[final_entry] &nbsp;|&nbsp; <b>Cover / Exit target:</b> $[final_tp] &nbsp;|&nbsp; <b>Stop loss — get out if price hits:</b> $[final_sl]
+                    <b>Risk vs. Reward:</b> You risk $[final_sl minus final_entry, 2 decimal places] per share to potentially gain $[final_entry minus final_tp, 2 decimal places] — roughly a [compute ratio to 1 decimal]:1 payoff.
+                    <i>Options play (optional): Buy a $[strike_buy] put option. Take profits when it reaches $[strike_sell]. Expires [target_expiration].</i>
+
+                    ▸ Score between −15 and +15 — NO CLEAR TRADE:
+                    <b>Strategy:</b> <span style="color:#ffc107">Sit Out for Now</span> — [1-2 plain-English sentences: explain the lack of conviction and what the user should watch for before acting. E.g. "The stock is moving sideways with no strong trend in either direction — not a good risk/reward setup right now. Wait for it to break clearly in one direction before committing."]
+                    <b>Levels to watch:</b> Breaks above $[micro_resistance] → potential buy entry &nbsp;|&nbsp; Drops below $[micro_support] → potential sell / exit signal
+                    <b>Already holding this stock?</b> Protect yourself with a stop loss at $[final_sl]. If it bounces up toward $[final_tp], consider trimming your position there.
                     ---
 
                     ── MARKET SCANNER TABLE ──────────────────────────────────────────────────────
@@ -240,17 +271,18 @@ public class TradingAgentService {
     public Flux<String> streamAgentResponse(String input) {
         // Spring AI M6 + Ollama: .stream() with registered tools triggers a null evalDuration
         // NPE in MessageAggregator. Use blocking .call() on a bounded-elastic thread instead.
-        return Flux.defer(() -> {
-            String response = this.chatClient.prompt()
-                    .user(injectDynamicContext(input))
-                    .call()
-                    .content();
-            if (response == null || response.isBlank()) {
-                return Flux.just("### Pipeline Delay\nMarket processing streams returned empty data frames.");
-            }
-            return Flux.just(response);
-        })
-        .subscribeOn(Schedulers.boundedElastic())
-        .onErrorResume(e -> Flux.just("### Pipeline Interruption\nAnalysis crashed: " + e.getMessage()));
+        return Flux.concat(
+            Flux.just("__PROGRESS__:Fetching live market data..."),
+            Flux.defer(() -> {
+                String response = this.chatClient.prompt()
+                        .user(injectDynamicContext(input))
+                        .call()
+                        .content();
+                if (response == null || response.isBlank()) {
+                    return Flux.just("### Pipeline Delay\nMarket processing streams returned empty data frames.");
+                }
+                return Flux.just(response);
+            }).subscribeOn(Schedulers.boundedElastic())
+        ).onErrorResume(e -> Flux.just("### Pipeline Interruption\nAnalysis crashed: " + e.getMessage()));
     }
 }

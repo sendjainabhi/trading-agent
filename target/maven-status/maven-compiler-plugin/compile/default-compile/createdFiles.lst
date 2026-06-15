@@ -1,6 +1,8 @@
 com/quant/agent/BacktestController.class
+com/quant/agent/TradingAgentController$PriceResponse.class
 com/quant/agent/MarketClockService.class
 com/quant/agent/AlpacaStreamService.class
+com/quant/agent/McpServerConfig$CachedScan.class
 com/quant/agent/AlphaQuantAgentApplication.class
 com/quant/agent/BacktestService$TradeRecord.class
 com/quant/agent/BacktestService.class

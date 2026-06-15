@@ -120,11 +120,17 @@
             border-top: 1px solid var(--border-light);
         }
 
+        .table-scroll {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 16px 0;
+        }
+
         table {
             border-collapse: collapse;
             width: 100%;
             table-layout: fixed;
-            margin: 16px 0;
+            min-width: 700px;
             background-color: var(--bg-chat);
             border-radius: 8px;
             overflow: hidden;
@@ -224,6 +230,65 @@
         }
 
         .chip:disabled { opacity: 0.45; cursor: not-allowed; }
+
+        /* ── Bubble price strip (inside each agent response) ──── */
+        .bubble-strip {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-light);
+            font-family: 'SFMono-Regular', Consolas, 'Courier New', monospace;
+            font-size: 0.8rem;
+        }
+        .bubble-strip-cell {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: #f0f5ff;
+            border: 1px solid #d0e0ff;
+            border-radius: 6px;
+            padding: 5px 11px;
+            transition: background 0.2s;
+        }
+        .bubble-strip-cell:hover { background: #e4edff; }
+        .bsc-ticker { font-weight: 700; font-size: 0.82rem; letter-spacing: 0.04em; }
+        .bsc-price  { font-weight: 600; font-size: 0.88rem; }
+        .bsc-change { font-size: 0.74rem; }
+        .bsc-change.up   { color: #28a745; }
+        .bsc-change.down { color: #dc3545; }
+        .bsc-change.flat { color: #888; }
+        .bsc-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+            color: #6c757d;
+            font-size: 0.76rem;
+        }
+        .bsc-time { white-space: nowrap; color: #888; }
+        .bsc-select {
+            background: transparent;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            padding: 2px 5px;
+            font-size: 0.74rem;
+            color: #495057;
+            cursor: pointer;
+        }
+        .bsc-btn {
+            background: transparent;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            color: var(--primary-blue);
+            padding: 2px 8px;
+            font-size: 0.76rem;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .bsc-btn:hover { background: #e8f0fe; }
     </style>
 </head>
 <body>
@@ -255,9 +320,238 @@
 </div>
 
 <script>
+    // ── State ─────────────────────────────────────────────────────────────────
+    let activeStrip           = null;
+    let lastAgentMsg          = null;
+    let refreshTimerId        = null;
+    let activeAbortController = null;
+    let stripGeneration       = 0;
+
+    // ── marked: don't wrap block-level LLM HTML in <p> tags ──────────────────
+    (function () {
+        const renderer = new marked.Renderer();
+        renderer.paragraph = function (token) {
+            const text = (typeof token === 'object' && token !== null) ? (token.text || '') : String(token || '');
+            return text.trimStart().startsWith('<') ? text + '\n' : '<p>' + text + '</p>\n';
+        };
+        marked.use({ renderer, breaks: true });
+    })();
+
+    // ── Ticker helpers ────────────────────────────────────────────────────────
+    const TICKER_STOP = new Set([
+        'A','I','AM','AN','AT','BE','BY','DO','ETF','FOR','GO','HI','IF',
+        'IN','IS','IT','ME','MY','NO','OF','OK','ON','OR','THE','TO','UP',
+        'VS','AND','ARE','BIG','BUY','CAN','CEO','CFO','GET','HOT','HOW',
+        'IPO','NEW','NOW','OTC','ATH','ATL','PRE','ALL','TOP','SELL','SCAN',
+        'SHOW','WHAT','WHEN','WITH','MOST','BEST','FROM','GIVE','FIND','LAST',
+        'LIVE','JUST','HIGH','LOW'
+    ]);
+
+    const COMPANY_MAP = {
+        'tesla':'TSLA','nvidia':'NVDA','apple':'AAPL','google':'GOOGL',
+        'alphabet':'GOOGL','microsoft':'MSFT','amazon':'AMZN','meta':'META',
+        'facebook':'META','netflix':'NFLX','amd':'AMD','intel':'INTC',
+        'broadcom':'AVGO','salesforce':'CRM','palantir':'PLTR',
+        'coinbase':'COIN','shopify':'SHOP','snowflake':'SNOW',
+        'uber':'UBER','lyft':'LYFT','airbnb':'ABNB','spotify':'SPOT'
+    };
+
+    // Extract every unique TICKER ($PRICE) pair from the AI's response text
+    // Common financial terms that look like tickers (uppercase + price in parens) but aren't
+    const TICKER_BLOCKLIST = new Set([
+        'VWAP','EMA','SMA','WMA','RSI','MACD','ATH','ATL','ETF','IPO','NAV',
+        'ADX','ADR','OTC','SEC','NYSE','NASDAQ','SPX','VIX','OI','IV','PE',
+        'EPS','TTM','YTD','QOQ','YOY','AUM','CAGR','FCF','DCF','ROE','ROI',
+        'EBIT','EBITDA','GAAP','ROIC','NII','NIM','BPS','PPS','ATM','ITM','OTM'
+    ]);
+
+    function extractAllTickers(text) {
+        const seen = new Set(), result = [];
+        const re = /\b([A-Z]{1,5})\s*\(\$[\d,]+\.?\d{0,2}\)/g;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            if (!seen.has(m[1]) && !TICKER_BLOCKLIST.has(m[1])) {
+                seen.add(m[1]);
+                result.push(m[1]);
+            }
+        }
+        return result;
+    }
+
+    // Fallback when response has no TICKER ($PRICE) pattern (e.g. conversational reply)
+    function detectTickerFromInput(text) {
+        const lower = text.toLowerCase();
+        for (const [name, ticker] of Object.entries(COMPANY_MAP)) {
+            if (lower.includes(name)) return ticker;
+        }
+        const upper = text.toUpperCase();
+        for (const m of upper.matchAll(/\b([A-Z]{2,5})\b/g)) {
+            if (!TICKER_STOP.has(m[1])) return m[1];
+        }
+        return null;
+    }
+
+    // ── LLM output helpers ────────────────────────────────────────────────────
+    const RAW_TAG_MAP = {
+        'EXECUTE_CALL_OR_LONG_SPREAD':       '🔥 Buy Now',
+        'PREPARE_LONG_BUY_DIP_AT_VWAP':      '⏳ Wait to Buy on a Dip',
+        'EXECUTE_PUT_OR_SHORT_SPREAD':        '⚠️ Sell / Short Now',
+        'PREPARE_SHORT_FADE_BOUNCE_AT_VWAP':  '⏳ Wait to Sell on a Bounce',
+        'STAND_DOWN_COLLECT_PREMIUM':         '— No Clear Trade',
+        'STRONG_BUY':  '🔥 Strong Buy',
+        'STRONG_SELL': '🔴 Strong Sell',
+    };
+    function sanitizeLlmOutput(html) {
+        let out = html;
+        for (const [raw, label] of Object.entries(RAW_TAG_MAP))
+            out = out.replaceAll(raw, label);
+        return out.replace(/\{OPTIONAL_CUSTOM_DURATION\}/g, '');
+    }
+    function wrapTables(container) {
+        container.querySelectorAll('table').forEach(t => {
+            if (t.parentElement.classList.contains('table-scroll')) return;
+            const wrap = document.createElement('div');
+            wrap.className = 'table-scroll';
+            t.parentNode.insertBefore(wrap, t);
+            wrap.appendChild(t);
+        });
+    }
+
+    // ── Bubble strip ──────────────────────────────────────────────────────────
+    function activateBubbleStrip(agentMsg, tickers) {
+        if (!tickers.length) return;
+        const myGen = ++stripGeneration;
+
+        // 1. Wrap each inline TICKER ($PRICE) — symbol gets data-live-symbol, price gets
+        //    data-live-price so the refresh can color both identically (same change direction).
+        //    Do this BEFORE appending the strip so the innerHTML rebuild is safe.
+        tickers.forEach(ticker => {
+            const esc = ticker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re  = new RegExp('(' + esc + '\\s*\\()\\$[\\d,]+\\.?\\d{0,2}(\\))', 'g');
+            const patched = agentMsg.innerHTML.replace(
+                re,
+                () =>
+                    `<span data-live-symbol data-ticker="${ticker}" style="font-weight:bold">${ticker}</span>` +
+                    ` (<span data-live-price data-ticker="${ticker}" style="font-weight:bold">$…</span>)`
+            );
+            if (patched !== agentMsg.innerHTML) agentMsg.innerHTML = patched;
+        });
+
+        // 2. Build the strip with one cell per ticker
+        const strip = document.createElement('div');
+        strip.className = 'bubble-strip';
+
+        tickers.forEach(ticker => {
+            const cell = document.createElement('div');
+            cell.className   = 'bubble-strip-cell';
+            cell.dataset.ticker = ticker;
+            cell.innerHTML =
+                `<span class="bsc-ticker">${ticker}</span>` +
+                `<span class="bsc-price">…</span>` +
+                `<span class="bsc-change flat"></span>`;
+            strip.appendChild(cell);
+        });
+
+        // Controls: time + interval selector + refresh button
+        const ctrl = document.createElement('div');
+        ctrl.className = 'bsc-controls';
+        ctrl.innerHTML =
+            `<span class="bsc-time"></span>` +
+            `<select class="bsc-select">` +
+                `<option value="0">Off</option>` +
+                `<option value="30">30s</option>` +
+                `<option value="60" selected>1m</option>` +
+                `<option value="120">2m</option>` +
+                `<option value="300">5m</option>` +
+            `</select>` +
+            `<button class="bsc-btn" title="Refresh now">⟳</button>`;
+        strip.appendChild(ctrl);
+        agentMsg.insertBefore(strip, agentMsg.firstChild);
+
+        // 3. Wire up controls with closures so they always refresh THIS strip
+        const doRefresh = () => { if (myGen !== stripGeneration) return; refreshAllCells(strip, agentMsg); };
+        ctrl.querySelector('.bsc-btn').onclick = doRefresh;
+        ctrl.querySelector('.bsc-select').onchange = function () {
+            if (refreshTimerId) clearInterval(refreshTimerId);
+            refreshTimerId = null;
+            const secs = parseInt(this.value, 10);
+            if (secs > 0) refreshTimerId = setInterval(doRefresh, secs * 1000);
+        };
+
+        // 4. Replace global active strip reference and start refreshing
+        if (refreshTimerId) clearInterval(refreshTimerId);
+        activeStrip  = strip;
+        lastAgentMsg = agentMsg;
+        doRefresh();                                              // immediate
+        refreshTimerId = setInterval(doRefresh, 60 * 1000);      // default 1m
+    }
+
+    async function refreshAllCells(strip, msgEl) {
+        if (!strip) return;
+        const cells = Array.from(strip.querySelectorAll('.bubble-strip-cell[data-ticker]'));
+        await Promise.all(cells.map(c => refreshCell(c, c.dataset.ticker, msgEl)));
+        const timeEl = strip.querySelector('.bsc-time');
+        if (timeEl) {
+            timeEl.textContent = new Date().toLocaleTimeString(
+                'en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'}
+            ) + ' ET';
+        }
+    }
+
+    async function refreshCell(cell, ticker, msgEl) {
+        try {
+            const res  = await fetch(`/api/price/${encodeURIComponent(ticker)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.price <= 0) return;
+
+            const sign  = data.change >= 0 ? '+' : '';
+            const cls   = data.change > 0.005 ? 'up' : (data.change < -0.005 ? 'down' : 'flat');
+            const arrow = cls === 'up' ? '▲' : (cls === 'down' ? '▼' : '—');
+            const color = cls === 'up' ? '#28a745' : (cls === 'down' ? '#dc3545' : '#0056b3');
+
+            // Update the strip cell
+            const tickerEl = cell.querySelector('.bsc-ticker');
+            const priceEl  = cell.querySelector('.bsc-price');
+            const changeEl = cell.querySelector('.bsc-change');
+            tickerEl.style.color = color;
+            priceEl.textContent  = '$' + data.price.toFixed(2);
+            priceEl.style.color  = color;
+            changeEl.textContent = `${arrow} ${sign}${data.changePercent.toFixed(2)}%`;
+            changeEl.className   = 'bsc-change ' + cls;
+
+            // Update the inline TICKER ($PRICE) spans inside the bubble text
+            if (msgEl) {
+                // Update the price span
+                const priceSpan = msgEl.querySelector(`[data-live-price][data-ticker="${ticker}"]`);
+                if (priceSpan) {
+                    priceSpan.textContent = '$' + data.price.toFixed(2);
+                    priceSpan.style.color = color;
+                }
+                // Update the symbol span (same color as price — both reflect today's direction)
+                const symbolSpan = msgEl.querySelector(`[data-live-symbol][data-ticker="${ticker}"]`);
+                if (symbolSpan) {
+                    symbolSpan.style.color = color;
+                }
+                // Walk up from the price span and recolor the first ancestor <span> the AI
+                // generated for the header (the outer style="color:..."> wrapper around the symbol)
+                if (priceSpan) {
+                    let outer = priceSpan.parentElement;
+                    while (outer && outer !== msgEl) {
+                        if (outer.tagName === 'SPAN' && outer.style.color) {
+                            outer.style.color = color;
+                            break;
+                        }
+                        outer = outer.parentElement;
+                    }
+                }
+            }
+        } catch (e) { /* silent: stale price stays visible */ }
+    }
+
+    // ── Chip helpers ─────────────────────────────────────────────────────────
     function submitChip(text) {
-        const inputElement = document.getElementById('commandInput');
-        inputElement.value = text;
+        document.getElementById('commandInput').value = text;
         dispatchCommand();
     }
 
@@ -265,49 +559,64 @@
         document.querySelectorAll('.chip').forEach(c => c.disabled = disabled);
     }
 
+    // ── Main chat dispatch ────────────────────────────────────────────────────
     async function dispatchCommand() {
-        const inputElement = document.getElementById('commandInput');
-        const sendButton = document.getElementById('sendButton');
-        const rawText = inputElement.value.trim();
+        const inputEl  = document.getElementById('commandInput');
+        const sendBtn  = document.getElementById('sendButton');
+        const rawText  = inputEl.value.trim();
         if (!rawText) return;
 
-        inputElement.value = '';
-        inputElement.disabled = true;
-        sendButton.disabled = true;
+        if (activeAbortController) activeAbortController.abort();
+        activeAbortController = new AbortController();
+
+        inputEl.value    = '';
+        inputEl.disabled = true;
+        sendBtn.textContent = 'Cancel';
+        sendBtn.onclick  = () => activeAbortController && activeAbortController.abort();
         setChipsDisabled(true);
 
         const chatWindow = document.getElementById('chat-window');
 
         const userMsg = document.createElement('div');
-        userMsg.className = 'message user';
-        userMsg.textContent = rawText; 
+        userMsg.className   = 'message user';
+        userMsg.textContent = rawText;
         chatWindow.appendChild(userMsg);
 
         const agentMsg = document.createElement('div');
         agentMsg.className = 'message agent';
-        agentMsg.innerHTML = '<span class="loading-text">Fetching data and analyzing trends...</span>';
+        agentMsg.innerHTML = '<span class="loading-text">Fetching live market data...</span>';
         chatWindow.appendChild(agentMsg);
-        
         chatWindow.scrollTop = chatWindow.scrollHeight;
 
+        function resetUI() {
+            inputEl.disabled    = false;
+            sendBtn.textContent = 'Send';
+            sendBtn.onclick     = dispatchCommand;
+            setChipsDisabled(false);
+            inputEl.focus();
+        }
+
         try {
-            const response = await fetch('http://localhost:8080/api/chat/stream', {
+            const response = await fetch('/api/chat/stream', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ input: rawText })
+                body: JSON.stringify({ input: rawText }),
+                signal: activeAbortController.signal
             });
+            if (!response.ok) throw new Error('Server rejected the request.');
 
-            if (!response.ok) throw new Error("Server rejected the request.");
-
-            const reader = response.body.getReader();
+            const reader  = response.body.getReader();
             const decoder = new TextDecoder();
-            let processActive = true;
             let finalOutputString = '';
-            let renderPending = false;
-            
+            let renderPending     = false;
+            let processActive     = true;
+            let streamComplete    = false;
+
             const renderFrame = () => {
+                if (streamComplete) { renderPending = false; return; }
                 if (finalOutputString.trim()) {
-                    agentMsg.innerHTML = marked.parse(finalOutputString);
+                    agentMsg.innerHTML = sanitizeLlmOutput(marked.parse(finalOutputString));
+                    wrapTables(agentMsg);
                 }
                 chatWindow.scrollTop = chatWindow.scrollHeight;
                 renderPending = false;
@@ -315,30 +624,43 @@
 
             while (processActive) {
                 const { value, done } = await reader.read();
-                if (done) {
-                    processActive = false;
-                    break;
+                if (done) { processActive = false; break; }
+                const chunk = decoder.decode(value, { stream: true });
+                if (chunk.startsWith('__PROGRESS__:')) {
+                    agentMsg.innerHTML = `<span class="loading-text">${chunk.slice(13)}</span>`;
+                    chatWindow.scrollTop = chatWindow.scrollHeight;
+                    continue;
                 }
-                
-                finalOutputString += decoder.decode(value, { stream: true });
-                
-                if (!renderPending) {
-                    renderPending = true;
-                    requestAnimationFrame(renderFrame);
-                }
+                finalOutputString += chunk;
+                if (!renderPending) { renderPending = true; requestAnimationFrame(renderFrame); }
             }
 
-            if (renderPending) renderFrame();
+            if (finalOutputString.trim()) {
+                agentMsg.innerHTML = sanitizeLlmOutput(marked.parse(finalOutputString));
+                wrapTables(agentMsg);
+            }
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+            renderPending  = false;
+            streamComplete = true;
+
+            let tickers = extractAllTickers(finalOutputString);
+            if (!tickers.length) {
+                const t = detectTickerFromInput(rawText);
+                if (t) tickers = [t];
+            }
+            if (tickers.length) activateBubbleStrip(agentMsg, tickers);
 
         } catch (error) {
-            console.error(error);
-            agentMsg.innerHTML = '<span class="error-text">Connection Error: Ensure your Spring Boot Finnhub Backend is running on port 8080.</span>';
+            if (error.name === 'AbortError') {
+                agentMsg.innerHTML = '<span class="loading-text">Request cancelled.</span>';
+            } else {
+                console.error(error);
+                agentMsg.innerHTML = '<span class="error-text">Could not reach the server. Is the backend running?</span>';
+            }
             chatWindow.scrollTop = chatWindow.scrollHeight;
         } finally {
-            inputElement.disabled = false;
-            sendButton.disabled = false;
-            setChipsDisabled(false);
-            inputElement.focus();
+            activeAbortController = null;
+            resetUI();
         }
     }
 </script>

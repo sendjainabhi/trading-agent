@@ -59,7 +59,8 @@ public class MarketClockService {
 
     // ── Refresh from Alpaca clock API ─────────────────────────────────────────
 
-    private void refresh() {
+    private synchronized void refresh() {
+        if (Instant.now().isBefore(cacheExpiry)) return; // re-check under lock
         try {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create("https://api.alpaca.markets/v2/clock"))

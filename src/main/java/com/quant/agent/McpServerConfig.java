@@ -22,6 +22,7 @@ import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 @Configuration
@@ -29,6 +30,10 @@ public class McpServerConfig {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+
+    private record CachedScan(String json, Instant cachedAt) {}
+    private final ConcurrentHashMap<String, CachedScan> scanCache = new ConcurrentHashMap<>();
+    private static final long SCAN_CACHE_TTL_SECONDS = 30;
 
     @Value("${alpaca.api.key}")
     private String apiKey;
@@ -135,12 +140,7 @@ public class McpServerConfig {
 
     private double extractConfluenceScore(String tickerJson) {
         try {
-            int idx = tickerJson.indexOf("\"total_confluence_score\":");
-            if (idx < 0) return 0.0;
-            int start = idx + "\"total_confluence_score\":".length();
-            int end = tickerJson.indexOf(',', start);
-            if (end < 0) end = tickerJson.indexOf('}', start);
-            return Double.parseDouble(tickerJson.substring(start, end).trim());
+            return objectMapper.readTree(tickerJson).path("total_confluence_score").asDouble(0.0);
         } catch (Exception e) {
             return 0.0;
         }
@@ -163,7 +163,10 @@ public class McpServerConfig {
         double microResistance = (highToday > 0.0) ? highToday : currentPrice * 1.01;
         double avgVolume30d = 0.0;
         double hrv = 0.24; // historical realized volatility (20-day), default 24%
-        double atr14 = 0.0; // promoted to outer scope for trade sizing
+        double atr14 = 0.0;  // promoted to outer scope for trade sizing
+        double rsi14 = 50.0; // promoted for buy-strength checklist
+        double sma20 = 0.0;  // promoted for buy-strength checklist
+        double macdH1 = 0.0; // promoted for buy-strength checklist
 
         String sessionStatus = marketClockService.toPlainEnglish();
 
@@ -181,8 +184,8 @@ public class McpServerConfig {
         if (futureD1.get().statusCode() == 200) {
             JsonNode tickerNode = objectMapper.readTree(futureD1.get().body()).path("bars").path(ticker);
             if (tickerNode.isArray() && tickerNode.size() >= 22) {
-                double sma20 = calculateSmaFromBars(tickerNode, 20);
-                double rsi14 = calculateRsiFromBars(tickerNode, 14);
+                sma20 = calculateSmaFromBars(tickerNode, 20);
+                rsi14 = calculateRsiFromBars(tickerNode, 14);
                 atr14 = calculateAtrFromBars(tickerNode, 14);
                 avgVolume30d = calculateAvgVolumeFromBars(tickerNode, 30);
                 // 20-day Historical Realized Volatility from daily log returns
@@ -214,6 +217,7 @@ public class McpServerConfig {
                 double ema12h = calculateEmaFromBars(tickerNode, 12);
                 double ema26h = calculateEmaFromBars(tickerNode, 26);
                 double macdH = ema12h - ema26h;
+                macdH1 = macdH;
                 double rsiH1 = calculateRsiFromBars(tickerNode, 9);
                 double macdScore = currentPrice > 0 ? normalizeScore(macdH / currentPrice, 5000.0) : 0.0;
                 double priceVsEmaScore = ema26h > 0 ? normalizeScore((currentPrice - ema26h) / ema26h, 2500.0) : 0.0;
@@ -430,6 +434,57 @@ public class McpServerConfig {
         double strikeBuy = getNearestOptionStrike(dynamicEntry);
         double strikeSell = getNearestOptionStrike(dynamicTp);
 
+        // ── Symmetric buy / sell signal checklist (6 signals each direction) ──
+        // Buy and sell are scored independently so both directions are equally rigorous.
+        int buyScore = 0, sellScore = 0;
+
+        // 1. Long-term trend: price vs 20-day moving average
+        boolean aboveSma20 = sma20 > 0 && currentPrice > sma20;
+        boolean belowSma20 = sma20 > 0 && currentPrice < sma20;
+        if (aboveSma20) buyScore++;
+        if (belowSma20) sellScore++;
+
+        // 2. RSI momentum
+        //    Buy:  45–72 = healthy upward momentum, not yet overbought
+        //    Sell: < 45  = momentum fading  OR  > 72 = overbought, due for pullback
+        boolean rsiBullish = rsi14 >= 45 && rsi14 <= 72;
+        boolean rsiBearish = rsi14 < 45  || rsi14 > 72;
+        if (rsiBullish) buyScore++;
+        if (rsiBearish) sellScore++;
+
+        // 3. MACD (1-hour EMA12 vs EMA26): direction of short-term price pressure
+        boolean macdBullish = macdH1 > 0;
+        boolean macdBearish = macdH1 < 0;
+        if (macdBullish) buyScore++;
+        if (macdBearish) sellScore++;
+
+        // 4. Price vs today's average trade price (VWAP)
+        boolean aboveVwap = vwap > 0 && currentPrice > vwap * 1.001;
+        boolean belowVwap = vwap > 0 && currentPrice < vwap * 0.999;
+        if (aboveVwap) buyScore++;
+        if (belowVwap) sellScore++;
+
+        // 5. Hourly trend direction
+        boolean hourlyRising  = h1Score > 15;
+        boolean hourlyFalling = h1Score < -15;
+        if (hourlyRising)  buyScore++;
+        if (hourlyFalling) sellScore++;
+
+        // 6. Volume confirms the directional move (high volume + price direction = conviction)
+        boolean highVolume        = avgVolume30d > 0 && totalVolume > avgVolume30d * 1.2;
+        boolean volConfirmsBuy    = highVolume && currentPrice >= priorClose;
+        boolean volConfirmsSell   = highVolume && currentPrice <  priorClose;
+        if (volConfirmsBuy)  buyScore++;
+        if (volConfirmsSell) sellScore++;
+
+        int netSignal = buyScore - sellScore;
+        String buyStrength;
+        if      (netSignal >= 4)  buyStrength = "STRONG_BUY";
+        else if (netSignal >= 2)  buyStrength = "BUY";
+        else if (netSignal >= -1) buyStrength = "WATCH";
+        else if (netSignal >= -3) buyStrength = "SELL";
+        else                      buyStrength = "STRONG_SELL";
+
         LocalDate today = nowET.toLocalDate();
         LocalDate expDate;
         if (customDays == 0) {
@@ -447,12 +502,28 @@ public class McpServerConfig {
         }
         String targetExpiration = expDate.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
 
-        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"custom_upper\":%.2f,\"custom_lower\":%.2f,\"custom_days\":%d,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"strike_sell\":%.2f,\"target_expiration\":\"%s\"",
-                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, strikeSell, targetExpiration);
+        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"custom_upper\":%.2f,\"custom_lower\":%.2f,\"custom_days\":%d,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"strike_sell\":%.2f,\"target_expiration\":\"%s\""
+                + ",\"buy_strength\":\"%s\",\"buy_score\":%d,\"sell_score\":%d,\"rsi_14d\":%.1f"
+                + ",\"above_sma20\":%b,\"below_sma20\":%b"
+                + ",\"macd_bullish\":%b,\"macd_bearish\":%b"
+                + ",\"above_vwap\":%b,\"below_vwap\":%b"
+                + ",\"hourly_rising\":%b,\"hourly_falling\":%b"
+                + ",\"vol_confirms_buy\":%b,\"vol_confirms_sell\":%b",
+                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, strikeSell, targetExpiration,
+                buyStrength, buyScore, sellScore, rsi14,
+                aboveSma20, belowSma20,
+                macdBullish, macdBearish,
+                aboveVwap, belowVwap,
+                hourlyRising, hourlyFalling,
+                volConfirmsBuy, volConfirmsSell);
     }
 
     // Fetches Yahoo + full MTF analysis for one ticker — shared by both stockPriceFunction and the scanner.
     private String scanTicker(String ticker) {
+        CachedScan cached = scanCache.get(ticker);
+        if (cached != null && Instant.now().minusSeconds(SCAN_CACHE_TTL_SECONDS).isBefore(cached.cachedAt())) {
+            return cached.json();
+        }
         try {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
@@ -495,7 +566,9 @@ public class McpServerConfig {
             String base = String.format("{\"symbol\":\"%s\",\"current_price\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\"}",
                     ticker, currentPrice, pctString, String.format("%,d", vol));
             // mtf starts with a comma — strip the closing brace from base and append
-            return base.substring(0, base.length() - 1) + mtf + "}";
+            String result = base.substring(0, base.length() - 1) + mtf + "}";
+            scanCache.put(ticker, new CachedScan(result, Instant.now()));
+            return result;
         } catch (Exception e) {
             return null;
         }
@@ -744,12 +817,8 @@ public class McpServerConfig {
 
     private double extractPreMarketChangePct(String json) {
         try {
-            String tag = "\"percent_change\":\"";
-            int idx   = json.indexOf(tag);
-            if (idx < 0) return 0.0;
-            int start = idx + tag.length();
-            int end   = json.indexOf("\"", start);
-            return Double.parseDouble(json.substring(start, end).replace("%", "").replace("+", "").trim());
+            String raw = objectMapper.readTree(json).path("percent_change").asText("0%");
+            return Double.parseDouble(raw.replace("%", "").replace("+", "").trim());
         } catch (Exception e) {
             return 0.0;
         }
