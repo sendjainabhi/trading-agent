@@ -1,24 +1,47 @@
-# Compiled class file
-*.class
-
-# Log file
-*.log
-
-# BlueJ files
-*.ctxt
-
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
+# ── Build output ──────────────────────────────────────────────────────────────
+target/
 *.jar
 *.war
-*.nar
 *.ear
+*.nar
 *.zip
 *.tar.gz
 *.rar
+*.class
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+app.log
+app-local.log
+trading-agent.log
+tunnel.log
+
+# ── Runtime-generated scripts ─────────────────────────────────────────────────
+stop.sh
+local-stop.sh
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+
+# ── Maven wrapper jar ─────────────────────────────────────────────────────────
+.mvn/wrapper/maven-wrapper.jar
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+*.env
+application-local.yml
+application-secret.yml
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.ctxt
+.mtj.tmp/
 hs_err_pid*
 replay_pid*

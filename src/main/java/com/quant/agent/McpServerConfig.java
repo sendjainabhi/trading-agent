@@ -170,6 +170,9 @@ public class McpServerConfig {
 
         String sessionStatus = marketClockService.toPlainEnglish();
 
+        String insiderFrom = nowET.minusMonths(3).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+        String insiderTo   = nowET.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+
         CompletableFuture<HttpResponse<String>> futureD1 = httpClient.sendAsync(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=1Day&start=" + lookback45Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureH1 = httpClient.sendAsync(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=1Hour&start=" + lookback10Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureM15 = httpClient.sendAsync(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=15Min&start=" + lookback5Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
@@ -178,8 +181,14 @@ public class McpServerConfig {
         CompletableFuture<HttpResponse<String>> futureSentiment = httpClient.sendAsync(
                 HttpRequest.newBuilder().uri(URI.create("https://finnhub.io/api/v1/news-sentiment?symbol=" + ticker + "&token=" + finnhubKey))
                         .timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        CompletableFuture<HttpResponse<String>> futureInsider = httpClient.sendAsync(
+                HttpRequest.newBuilder().uri(URI.create("https://finnhub.io/api/v1/stock/insider-sentiment?symbol=" + ticker + "&from=" + insiderFrom + "&to=" + insiderTo + "&token=" + finnhubKey))
+                        .timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        CompletableFuture<HttpResponse<String>> futureRec = httpClient.sendAsync(
+                HttpRequest.newBuilder().uri(URI.create("https://finnhub.io/api/v1/stock/recommendation?symbol=" + ticker + "&token=" + finnhubKey))
+                        .timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
 
-        CompletableFuture.allOf(futureD1, futureH1, futureM15, futureM5, futureOptions, futureSentiment).join();
+        CompletableFuture.allOf(futureD1, futureH1, futureM15, futureM5, futureOptions, futureSentiment, futureInsider, futureRec).join();
 
         if (futureD1.get().statusCode() == 200) {
             JsonNode tickerNode = objectMapper.readTree(futureD1.get().body()).path("bars").path(ticker);
@@ -290,13 +299,64 @@ public class McpServerConfig {
             }
         } catch (Exception ignored) {}
 
+        // ── Smart money: insider sentiment + analyst consensus ────────────────
+        double smartMoneyScore = 0.0;
+        double insiderMspr    = 0.0;
+        int    insiderBuys    = 0, insiderSells = 0;
+        int    analystBuy     = 0, analystHold = 0, analystSell = 0;
+
+        try {
+            if (futureInsider.get().statusCode() == 200) {
+                JsonNode insiderNode = objectMapper.readTree(futureInsider.get().body());
+                JsonNode data = insiderNode.path("data");
+                if (data.isArray() && !data.isEmpty()) {
+                    double totalMspr = 0; int cnt = 0;
+                    for (JsonNode month : data) {
+                        totalMspr += month.path("mspr").asDouble(0);
+                        int ch = month.path("change").asInt(0);
+                        if (ch > 0) insiderBuys++; else if (ch < 0) insiderSells++;
+                        cnt++;
+                    }
+                    if (cnt > 0) {
+                        insiderMspr = totalMspr / cnt;
+                        // MSPR range is roughly -1 to +1; scale to ±50 contribution
+                        smartMoneyScore += Math.max(-50.0, Math.min(50.0, insiderMspr * 500.0));
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            if (futureRec.get().statusCode() == 200) {
+                JsonNode recArray = objectMapper.readTree(futureRec.get().body());
+                if (recArray.isArray() && !recArray.isEmpty()) {
+                    JsonNode latest = recArray.get(0);
+                    analystBuy  = latest.path("strongBuy").asInt(0) + latest.path("buy").asInt(0);
+                    analystHold = latest.path("hold").asInt(0);
+                    analystSell = latest.path("strongSell").asInt(0) + latest.path("sell").asInt(0);
+                    int total   = analystBuy + analystHold + analystSell;
+                    if (total > 0) {
+                        // Net analyst conviction, scaled to ±50 contribution
+                        smartMoneyScore += Math.max(-50.0, Math.min(50.0,
+                                ((double)(analystBuy - analystSell) / total) * 100.0));
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        smartMoneyScore = Math.max(-100.0, Math.min(100.0, smartMoneyScore));
+
+        String smartMoneyVerdict = smartMoneyScore > 25 ? "ACCUMULATING" :
+                                   smartMoneyScore < -25 ? "DISTRIBUTING" : "NEUTRAL";
+
+        // Weighted confluence — smart money gets 12%, news sentiment 8%
         double totalConfluenceScore;
         if (customDays > 10) {
-            totalConfluenceScore = (dailyScore * 0.63) + (h1Score * 0.27) + (sentimentScore * 0.10);
+            totalConfluenceScore = (dailyScore * 0.55) + (h1Score * 0.25) + (sentimentScore * 0.08) + (smartMoneyScore * 0.12);
         } else if (customDays > 3) {
-            totalConfluenceScore = (dailyScore * 0.45) + (h1Score * 0.27) + (m15Score * 0.18) + (sentimentScore * 0.10);
+            totalConfluenceScore = (dailyScore * 0.39) + (h1Score * 0.24) + (m15Score * 0.17) + (sentimentScore * 0.08) + (smartMoneyScore * 0.12);
         } else {
-            totalConfluenceScore = (dailyScore * 0.36) + (h1Score * 0.27) + (m15Score * 0.18) + (m5Score * 0.09) + (sentimentScore * 0.10);
+            totalConfluenceScore = (dailyScore * 0.31) + (h1Score * 0.24) + (m15Score * 0.16) + (m5Score * 0.09) + (sentimentScore * 0.08) + (smartMoneyScore * 0.12);
         }
 
         // Amplify or dampen conviction based on today's volume vs 30-day average
@@ -304,6 +364,13 @@ public class McpServerConfig {
             double volRatio = (double) totalVolume / avgVolume30d;
             double volumeMultiplier = volRatio > 2.0 ? 1.20 : volRatio > 1.3 ? 1.10 : volRatio < 0.4 ? 0.80 : volRatio < 0.7 ? 0.90 : 1.0;
             totalConfluenceScore = Math.max(-100.0, Math.min(100.0, totalConfluenceScore * volumeMultiplier));
+        }
+
+        // Alignment check: if smart money strongly contradicts technicals, dampen conviction
+        boolean smConflict = (smartMoneyScore > 30 && totalConfluenceScore < -15)
+                          || (smartMoneyScore < -30 && totalConfluenceScore > 15);
+        if (smConflict) {
+            totalConfluenceScore *= 0.70; // reduce by 30% when big money disagrees with chart
         }
 
         double impliedVolatility = 0.0;
@@ -365,22 +432,16 @@ public class McpServerConfig {
         // Scale ATR multiplier and R:R to the trade timeframe.
         // Daily ATR is the natural unit of market noise — stop must sit outside it.
         double atrStopMult;
-        double rrRatio;
+        double rrRatio = 2.0;   // fixed 2:1 R:R across all timeframes
         if (customDays == 0) {
             atrStopMult = 1.0;   // intraday: 1× ATR stop
-            rrRatio     = 2.0;   // 2:1 R:R minimum
         } else if (customDays <= 5) {
             atrStopMult = 1.25;  // short swing: 1.25× ATR
-            rrRatio     = 2.5;
         } else if (customDays <= 21) {
             atrStopMult = 1.5;   // medium swing: 1.5× ATR
-            rrRatio     = 3.0;
         } else {
             atrStopMult = 2.0;   // longer-term position: 2× ATR
-            rrRatio     = 3.0;
         }
-        // High conviction earns an extra 0.5× on the target (wider R:R)
-        if (Math.abs(totalConfluenceScore) >= 70.0) rrRatio += 0.5;
 
         // Stop distance — ATR-based with 1% floor; fall back to IV move if ATR unavailable
         double minStopFloor   = currentPrice * 0.01;
@@ -434,6 +495,31 @@ public class McpServerConfig {
         double strikeBuy = getNearestOptionStrike(dynamicEntry);
         double strikeSell = getNearestOptionStrike(dynamicTp);
 
+        // Realistic debit spread width: ~5–10% of price, capped at 1× ATR, minimum $2.50
+        double rawSpreadWidth = currentPrice >= 300 ? 10.0
+                              : currentPrice >= 100 ? 5.0
+                              : currentPrice >= 50  ? 2.50
+                              :                       1.0;
+        if (atr14 > 0) rawSpreadWidth = Math.min(rawSpreadWidth, atr14 * 0.5);
+        double spreadWidth = Math.max(rawSpreadWidth, 2.50);
+
+        // Short leg of the debit spread — a few strikes from entry, not at the full TP
+        double spreadShortStrike;
+        if (totalConfluenceScore >= 15.0) {
+            spreadShortStrike = getNearestOptionStrike(strikeBuy + spreadWidth);   // call spread: sell OTM call above
+        } else if (totalConfluenceScore <= -15.0) {
+            spreadShortStrike = getNearestOptionStrike(strikeBuy - spreadWidth);   // put spread:  sell OTM put below
+        } else {
+            spreadShortStrike = strikeSell; // iron condor uses IC legs below
+        }
+
+        // Iron Condor legs — used when verdict is STAND_DOWN_COLLECT_PREMIUM
+        double icWing = atr14 > 0 ? atr14 * 0.5 : oneDayExpectedMove * 0.5;
+        double icPutSell  = getNearestOptionStrike(microSupport);
+        double icPutBuy   = getNearestOptionStrike(microSupport - icWing);
+        double icCallSell = getNearestOptionStrike(microResistance);
+        double icCallBuy  = getNearestOptionStrike(microResistance + icWing);
+
         // ── Symmetric buy / sell signal checklist (6 signals each direction) ──
         // Buy and sell are scored independently so both directions are equally rigorous.
         int buyScore = 0, sellScore = 0;
@@ -485,6 +571,24 @@ public class McpServerConfig {
         else if (netSignal >= -3) buyStrength = "SELL";
         else                      buyStrength = "STRONG_SELL";
 
+        // Compact signal strings — replaces 10 individual booleans in the JSON payload
+        StringBuilder buySignalsStr  = new StringBuilder();
+        StringBuilder sellSignalsStr = new StringBuilder();
+        if (aboveSma20)       buySignalsStr.append("sma20,");
+        if (belowSma20)       sellSignalsStr.append("sma20,");
+        if (rsiBullish)       buySignalsStr.append("rsi,");
+        if (rsiBearish)       sellSignalsStr.append("rsi,");
+        if (macdBullish)      buySignalsStr.append("macd,");
+        if (macdBearish)      sellSignalsStr.append("macd,");
+        if (aboveVwap)        buySignalsStr.append("vwap,");
+        if (belowVwap)        sellSignalsStr.append("vwap,");
+        if (hourlyRising)     buySignalsStr.append("h1trend,");
+        if (hourlyFalling)    sellSignalsStr.append("h1trend,");
+        if (volConfirmsBuy)   buySignalsStr.append("volume,");
+        if (volConfirmsSell)  sellSignalsStr.append("volume,");
+        String activeBuySignals  = buySignalsStr.length()  > 0 ? buySignalsStr.substring(0, buySignalsStr.length() - 1)   : "none";
+        String activeSellSignals = sellSignalsStr.length() > 0 ? sellSignalsStr.substring(0, sellSignalsStr.length() - 1) : "none";
+
         LocalDate today = nowET.toLocalDate();
         LocalDate expDate;
         if (customDays == 0) {
@@ -502,20 +606,18 @@ public class McpServerConfig {
         }
         String targetExpiration = expDate.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
 
-        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"custom_upper\":%.2f,\"custom_lower\":%.2f,\"custom_days\":%d,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"strike_sell\":%.2f,\"target_expiration\":\"%s\""
+        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"custom_upper\":%.2f,\"custom_lower\":%.2f,\"custom_days\":%d,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"spread_short_strike\":%.2f,\"strike_sell\":%.2f,\"ic_put_sell\":%.2f,\"ic_put_buy\":%.2f,\"ic_call_sell\":%.2f,\"ic_call_buy\":%.2f,\"target_expiration\":\"%s\""
                 + ",\"buy_strength\":\"%s\",\"buy_score\":%d,\"sell_score\":%d,\"rsi_14d\":%.1f"
-                + ",\"above_sma20\":%b,\"below_sma20\":%b"
-                + ",\"macd_bullish\":%b,\"macd_bearish\":%b"
-                + ",\"above_vwap\":%b,\"below_vwap\":%b"
-                + ",\"hourly_rising\":%b,\"hourly_falling\":%b"
-                + ",\"vol_confirms_buy\":%b,\"vol_confirms_sell\":%b",
-                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, strikeSell, targetExpiration,
+                + ",\"active_buy_signals\":\"%s\",\"active_sell_signals\":\"%s\""
+                + ",\"smart_money_score\":%.1f,\"smart_money_verdict\":\"%s\",\"smart_money_conflict\":%b"
+                + ",\"insider_mspr\":%.4f,\"insider_buys\":%d,\"insider_sells\":%d"
+                + ",\"analyst_buy\":%d,\"analyst_hold\":%d,\"analyst_sell\":%d",
+                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, spreadShortStrike, strikeSell, icPutSell, icPutBuy, icCallSell, icCallBuy, targetExpiration,
                 buyStrength, buyScore, sellScore, rsi14,
-                aboveSma20, belowSma20,
-                macdBullish, macdBearish,
-                aboveVwap, belowVwap,
-                hourlyRising, hourlyFalling,
-                volConfirmsBuy, volConfirmsSell);
+                activeBuySignals, activeSellSignals,
+                smartMoneyScore, smartMoneyVerdict, smConflict,
+                insiderMspr, insiderBuys, insiderSells,
+                analystBuy, analystHold, analystSell);
     }
 
     // Fetches Yahoo + full MTF analysis for one ticker — shared by both stockPriceFunction and the scanner.

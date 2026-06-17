@@ -26,15 +26,15 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
+            height: 100dvh;
             color: var(--text-dark);
             overflow: hidden;
         }
 
         .chat-container {
             width: 96%;
-            max-width: 1500px; 
-            height: 94vh;
+            max-width: 1500px;
+            height: 94dvh;
             background-color: var(--bg-chat);
             border-radius: 12px;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
@@ -156,7 +156,8 @@
 
         .control-panel {
             display: flex;
-            padding: 20px;
+            padding: 12px 20px;
+            padding-bottom: max(12px, env(safe-area-inset-bottom));
             background-color: var(--bg-chat);
             border-top: 1px solid var(--border-light);
             gap: 12px;
@@ -173,7 +174,7 @@
             padding: 14px 20px;
             border: 1px solid #ced4da;
             border-radius: 30px;
-            font-size: 0.95rem;
+            font-size: 1rem; /* ≥16px prevents iOS auto-zoom on focus */
             font-family: inherit;
             outline: none;
             transition: border-color 0.2s, box-shadow 0.2s;
@@ -244,6 +245,7 @@
             font-size: 0.95rem;
             font-weight: 600;
             cursor: pointer;
+            touch-action: manipulation;
             transition: background-color 0.2s, transform 0.1s;
         }
 
@@ -341,6 +343,89 @@
             transition: background 0.15s;
         }
         .bsc-btn:hover { background: #e8f0fe; }
+
+        /* ── Agent message — web style, readable ────────────────────────────── */
+        .message.agent {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-size: 0.95rem;
+            font-weight: 500;
+            color: #0a0a0a;
+            line-height: 1.55;
+            background-color: #ffffff;
+            border: 1px solid #dee2e6;
+        }
+
+        .message.agent p {
+            margin: 1px 0;
+        }
+
+        .message.agent b {
+            font-weight: 700;
+            color: #000000;
+        }
+
+        .message.agent hr {
+            margin: 6px 0;
+            border: none;
+            border-top: 1px solid #dee2e6;
+        }
+
+        /* ── Mobile responsive ───────────────────────────────────────────────── */
+        @media (max-width: 768px) {
+            body { align-items: flex-start; }
+
+            .chat-container {
+                width: 100%;
+                max-width: 100%;
+                height: 100dvh;
+                border-radius: 0;
+                box-shadow: none;
+            }
+
+            header {
+                padding: 10px 14px;
+                font-size: 0.95rem;
+            }
+
+            .subtitle { font-size: 0.66rem; margin-top: 2px; }
+
+            #chat-window { padding: 10px 8px; gap: 10px; }
+
+            .message {
+                padding: 10px 12px;
+                font-size: 0.88rem;
+                border-radius: 8px;
+            }
+
+            .message.user { max-width: 90%; }
+
+            .message.agent {
+                font-size: 0.88rem;
+                line-height: 1.6;
+            }
+
+            .suggestion-chips { padding: 6px 8px 0; gap: 5px; }
+
+            .chip { font-size: 0.72rem; padding: 5px 10px; }
+
+            .control-panel {
+                padding: 8px 10px;
+                padding-bottom: max(8px, env(safe-area-inset-bottom));
+                gap: 8px;
+            }
+
+            input[type="text"] { padding: 11px 16px; }
+
+            button { padding: 0 16px; font-size: 0.88rem; min-width: 60px; }
+
+            table { font-size: 0.78rem; min-width: 540px; }
+
+            th, td { padding: 7px 9px; }
+
+            .bubble-strip { font-size: 0.73rem; gap: 6px; }
+            .bubble-strip-cell { padding: 4px 8px; }
+            .bsc-controls { width: 100%; margin-left: 0; margin-top: 4px; }
+        }
     </style>
 </head>
 <body>
@@ -389,7 +474,7 @@
             const text = (typeof token === 'object' && token !== null) ? (token.text || '') : String(token || '');
             return text.trimStart().startsWith('<') ? text + '\n' : '<p>' + text + '</p>\n';
         };
-        marked.use({ renderer, breaks: true });
+        marked.use({ renderer, breaks: true, gfm: true, pedantic: false });
     })();
 
     // ── Ticker helpers ────────────────────────────────────────────────────────
@@ -460,7 +545,40 @@
         let out = html;
         for (const [raw, label] of Object.entries(RAW_TAG_MAP))
             out = out.replaceAll(raw, label);
-        return out.replace(/\{OPTIONAL_CUSTOM_DURATION\}/g, '');
+        out = out.replace(/\{OPTIONAL_CUSTOM_DURATION\}/g, '');
+        out = applyColorCoding(out);
+        return out;
+    }
+
+    // Colour-code arrows and direction phrases in text nodes only (never inside tag attributes).
+    const GREEN = '#28a745', RED = '#dc3545', ORANGE = '#ffc107';
+
+    // Phrases the model should colour but sometimes misses
+    const PHRASE_COLORS = [
+        [/Trending UP ↑|Trend just flipped UP ↑|Going Up ↑|Rising ↑|Pushing Up ↑|Moving Up ↑/g, GREEN],
+        [/Trending DOWN ↓|Trend just flipped DOWN ↓|Going Down ↓|Falling ↓|Pushing Down ↓|Moving Down ↓/g, RED],
+        [/Buy \/ Long|Buy Now|Wait to Buy on a Dip/g, GREEN],
+        [/Sell \/ Short|Sell Now|Wait to Sell on a Bounce/g, RED],
+        [/Sideways →|Flat →|Sit Out for Now/g, ORANGE],
+    ];
+
+    function applyColorCoding(html) {
+        // Split into tag tokens and text tokens; only mutate text tokens.
+        return html.replace(/(<[^>]*>)|([^<]+)/g, (match, tag, text) => {
+            if (tag) return tag; // preserve HTML tags and their attributes untouched
+
+            // 1. Colour full directional phrases first (they include the arrow)
+            let out = PHRASE_COLORS.reduce((t, [re, color]) =>
+                t.replace(re, m => `<span style="color:${color}">${m}</span>`), text);
+
+            // 2. Colour any remaining bare arrows not already wrapped above
+            out = out
+                .replace(/↑/g, `<span style="color:${GREEN}">↑</span>`)
+                .replace(/↓/g, `<span style="color:${RED}">↓</span>`)
+                .replace(/→/g, `<span style="color:${ORANGE}">→</span>`);
+
+            return out;
+        });
     }
     function wrapTables(container) {
         container.querySelectorAll('table').forEach(t => {
@@ -692,6 +810,17 @@
 
     function setChipsDisabled(disabled) {
         document.querySelectorAll('.chip').forEach(c => c.disabled = disabled);
+    }
+
+    // ── Mobile keyboard resize fallback (iOS < 16 / older Android) ───────────
+    if (window.visualViewport) {
+        const container = document.querySelector('.chat-container');
+        window.visualViewport.addEventListener('resize', () => {
+            container.style.height = Math.floor(window.visualViewport.height * 0.94) + 'px';
+        });
+        window.visualViewport.addEventListener('scroll', () => {
+            container.style.height = Math.floor(window.visualViewport.height * 0.94) + 'px';
+        });
     }
 
     // ── Main chat dispatch ────────────────────────────────────────────────────
