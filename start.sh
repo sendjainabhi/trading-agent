@@ -33,7 +33,7 @@ echo "✅ cloudflared is ready."
 echo ""
 echo "🔨 Step 2: Building project..."
 cd "$SCRIPT_DIR"
-./mvnw clean package -DskipTests -q
+mvn clean package -DskipTests -q
 if [ $? -ne 0 ]; then
     echo "❌ Maven build failed — check output above."
     exit 1

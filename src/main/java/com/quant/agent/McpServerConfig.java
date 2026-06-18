@@ -3,6 +3,8 @@ package com.quant.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Description;
@@ -28,12 +30,16 @@ import java.util.function.Function;
 @Configuration
 public class McpServerConfig {
 
+    private static final Logger log = LoggerFactory.getLogger(McpServerConfig.class);
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     private record CachedScan(String json, Instant cachedAt) {}
-    private final ConcurrentHashMap<String, CachedScan> scanCache = new ConcurrentHashMap<>();
-    private static final long SCAN_CACHE_TTL_SECONDS = 30;
+    private final ConcurrentHashMap<String, CachedScan> scanCache  = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CachedScan> stockCache = new ConcurrentHashMap<>();
+    private static final long SCAN_CACHE_TTL_SECONDS  = 30;
+    private static final long STOCK_CACHE_TTL_SECONDS = 60;
 
     @Value("${alpaca.api.key}")
     private String apiKey;
@@ -162,11 +168,14 @@ public class McpServerConfig {
         double microSupport = (lowToday > 0.0) ? lowToday : currentPrice * 0.99;
         double microResistance = (highToday > 0.0) ? highToday : currentPrice * 1.01;
         double avgVolume30d = 0.0;
-        double hrv = 0.24; // historical realized volatility (20-day), default 24%
-        double atr14 = 0.0;  // promoted to outer scope for trade sizing
-        double rsi14 = 50.0; // promoted for buy-strength checklist
-        double sma20 = 0.0;  // promoted for buy-strength checklist
-        double macdH1 = 0.0; // promoted for buy-strength checklist
+        double hrv = 0.24;
+        double atr14 = 0.0;
+        double rsi14 = 50.0;
+        double sma20 = 0.0;
+        double macdH1 = 0.0;
+        String emaCrossoverStatus  = "Neutral";
+        double calculatedSupport    = currentPrice * 0.96;
+        double calculatedResistance = currentPrice * 1.04;
 
         String sessionStatus = marketClockService.toPlainEnglish();
 
@@ -197,6 +206,21 @@ public class McpServerConfig {
                 rsi14 = calculateRsiFromBars(tickerNode, 14);
                 atr14 = calculateAtrFromBars(tickerNode, 14);
                 avgVolume30d = calculateAvgVolumeFromBars(tickerNode, 30);
+
+                // EMA crossover (SMA9 vs SMA21) — previously required a separate historicalTrendFunction call
+                int d1sz = tickerNode.size();
+                double sma9d = calculateSmaFromBars(tickerNode, 9);
+                double sma21d = calculateSmaFromBars(tickerNode, 21);
+                double prevSma9 = 0, prevSma21 = 0;
+                if (d1sz >= 10) { for (int i = d1sz - 10; i < d1sz - 1; i++) prevSma9  += tickerNode.get(i).path("c").asDouble(); prevSma9  /= 9.0; }
+                if (d1sz >= 22) { for (int i = d1sz - 22; i < d1sz - 1; i++) prevSma21 += tickerNode.get(i).path("c").asDouble(); prevSma21 /= 21.0; }
+                if      (sma9d > sma21d && prevSma9 <= prevSma21) emaCrossoverStatus = "Bullish Cross";
+                else if (sma9d < sma21d && prevSma9 >= prevSma21) emaCrossoverStatus = "Bearish Cross";
+                else if (sma9d > sma21d)                          emaCrossoverStatus = "Bullish";
+                else                                               emaCrossoverStatus = "Bearish";
+
+                calculatedSupport    = atr14 > 0 ? currentPrice - (1.5 * atr14) : currentPrice * 0.96;
+                calculatedResistance = atr14 > 0 ? currentPrice + (1.5 * atr14) : currentPrice * 1.04;
                 // 20-day Historical Realized Volatility from daily log returns
                 int d1len = tickerNode.size();
                 if (d1len >= 22) {
@@ -319,8 +343,8 @@ public class McpServerConfig {
                     }
                     if (cnt > 0) {
                         insiderMspr = totalMspr / cnt;
-                        // MSPR range is roughly -1 to +1; scale to ±50 contribution
-                        smartMoneyScore += Math.max(-50.0, Math.min(50.0, insiderMspr * 500.0));
+                        // Finnhub MSPR is in -100 to +100; scale to ±50 contribution
+                        smartMoneyScore += Math.max(-50.0, Math.min(50.0, insiderMspr * 0.5));
                     }
                 }
             }
@@ -571,48 +595,70 @@ public class McpServerConfig {
         else if (netSignal >= -3) buyStrength = "SELL";
         else                      buyStrength = "STRONG_SELL";
 
-        // Compact signal strings — replaces 10 individual booleans in the JSON payload
+        // Pre-computed human-readable signal sentences — model outputs these verbatim, no translation needed
         StringBuilder buySignalsStr  = new StringBuilder();
         StringBuilder sellSignalsStr = new StringBuilder();
-        if (aboveSma20)       buySignalsStr.append("sma20,");
-        if (belowSma20)       sellSignalsStr.append("sma20,");
-        if (rsiBullish)       buySignalsStr.append("rsi,");
-        if (rsiBearish)       sellSignalsStr.append("rsi,");
-        if (macdBullish)      buySignalsStr.append("macd,");
-        if (macdBearish)      sellSignalsStr.append("macd,");
-        if (aboveVwap)        buySignalsStr.append("vwap,");
-        if (belowVwap)        sellSignalsStr.append("vwap,");
-        if (hourlyRising)     buySignalsStr.append("h1trend,");
-        if (hourlyFalling)    sellSignalsStr.append("h1trend,");
-        if (volConfirmsBuy)   buySignalsStr.append("volume,");
-        if (volConfirmsSell)  sellSignalsStr.append("volume,");
-        String activeBuySignals  = buySignalsStr.length()  > 0 ? buySignalsStr.substring(0, buySignalsStr.length() - 1)   : "none";
-        String activeSellSignals = sellSignalsStr.length() > 0 ? sellSignalsStr.substring(0, sellSignalsStr.length() - 1) : "none";
+        if (aboveSma20)      buySignalsStr.append("price is above the 20-day average, ");
+        if (belowSma20)      sellSignalsStr.append("price is below the 20-day average, ");
+        if (rsiBullish)      buySignalsStr.append("RSI momentum is healthy, ");
+        if (rsiBearish)      sellSignalsStr.append("RSI is weak or overbought, ");
+        if (macdBullish)     buySignalsStr.append("MACD is rising, ");
+        if (macdBearish)     sellSignalsStr.append("MACD is falling, ");
+        if (aboveVwap)       buySignalsStr.append("price is above today's average (VWAP), ");
+        if (belowVwap)       sellSignalsStr.append("price is below today's average (VWAP), ");
+        if (hourlyRising)    buySignalsStr.append("hourly trend is up, ");
+        if (hourlyFalling)   sellSignalsStr.append("hourly trend is down, ");
+        if (volConfirmsBuy)  buySignalsStr.append("volume confirms the move");
+        if (volConfirmsSell) sellSignalsStr.append("volume confirms the move");
+        String activeBuySignals  = buySignalsStr.length()  > 0
+                ? buySignalsStr.toString().replaceAll(",\\s*$", "")
+                : "No buy signals active";
+        String activeSellSignals = sellSignalsStr.length() > 0
+                ? sellSignalsStr.toString().replaceAll(",\\s*$", "")
+                : "No sell signals active";
 
         LocalDate today = nowET.toLocalDate();
         LocalDate expDate;
         if (customDays == 0) {
-            // Default: upcoming Friday of this week (Mon–Thu) or next Friday (if today is Fri)
-            // next() is strictly forward — never returns today, so we never get same-day expiry
             expDate = today.with(TemporalAdjusters.next(DayOfWeek.FRIDAY));
         } else {
-            // Custom timeframe: convert trading days → calendar days, snap to the next Friday on/after
             int calendarDaysToAdd = (int)(customDays * 1.45);
             expDate = today.plusDays(calendarDaysToAdd).with(TemporalAdjusters.nextOrSame(DayOfWeek.FRIDAY));
-            // Safety: if that still lands on today or in the past, push to next Friday
             if (!expDate.isAfter(today)) {
                 expDate = today.with(TemporalAdjusters.next(DayOfWeek.FRIDAY));
             }
         }
         String targetExpiration = expDate.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
 
-        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"custom_upper\":%.2f,\"custom_lower\":%.2f,\"custom_days\":%d,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"spread_short_strike\":%.2f,\"strike_sell\":%.2f,\"ic_put_sell\":%.2f,\"ic_put_buy\":%.2f,\"ic_call_sell\":%.2f,\"ic_call_buy\":%.2f,\"target_expiration\":\"%s\""
+        // Pre-computed strategy name and options line — model outputs these verbatim, zero reasoning required
+        String strategyName;
+        String optionsLine;
+        if (totalConfluenceScore >= 15.0) {
+            strategyName = "Bull Call Debit Spread";
+            optionsLine  = "Buy 1× $" + String.format("%.2f", strikeBuy)
+                         + " Call · Sell 1× $" + String.format("%.2f", spreadShortStrike)
+                         + " Call · Expires " + targetExpiration;
+        } else if (totalConfluenceScore <= -15.0) {
+            strategyName = "Bear Put Debit Spread";
+            optionsLine  = "Buy 1× $" + String.format("%.2f", strikeBuy)
+                         + " Put · Sell 1× $" + String.format("%.2f", spreadShortStrike)
+                         + " Put · Expires " + targetExpiration;
+        } else {
+            strategyName = "Iron Condor";
+            optionsLine  = "Sell $" + String.format("%.2f", icPutSell)
+                         + " Put · Buy $" + String.format("%.2f", icPutBuy)
+                         + " Put · Sell $" + String.format("%.2f", icCallSell)
+                         + " Call · Buy $" + String.format("%.2f", icCallBuy)
+                         + " Call · Expires " + targetExpiration;
+        }
+
+        return String.format(",\"session_status\":\"%s\",\"macro_daily_trend_score\":%.1f,\"h1_radar_score\":%.1f,\"m15_radar_score\":%.1f,\"m5_radar_score\":%.1f,\"total_confluence_score\":%.1f,\"intraday_vwap\":%.2f,\"micro_support\":%.2f,\"micro_resistance\":%.2f,\"implied_volatility\":\"%.2f%%\",\"tomorrow_upper\":%.2f,\"tomorrow_lower\":%.2f,\"next_week_upper\":%.2f,\"next_week_lower\":%.2f,\"custom_upper\":%.2f,\"custom_lower\":%.2f,\"custom_days\":%d,\"automated_trade_verdict\":\"%s\",\"final_entry\":%.2f,\"final_tp\":%.2f,\"final_sl\":%.2f,\"strike_buy\":%.2f,\"spread_short_strike\":%.2f,\"strike_sell\":%.2f,\"target_expiration\":\"%s\",\"strategy_name\":\"%s\",\"options_line\":\"%s\",\"ema_crossover_status\":\"%s\",\"calculated_rsi_14d\":%.1f,\"calculated_support\":%.2f,\"calculated_resistance\":%.2f"
                 + ",\"buy_strength\":\"%s\",\"buy_score\":%d,\"sell_score\":%d,\"rsi_14d\":%.1f"
                 + ",\"active_buy_signals\":\"%s\",\"active_sell_signals\":\"%s\""
                 + ",\"smart_money_score\":%.1f,\"smart_money_verdict\":\"%s\",\"smart_money_conflict\":%b"
                 + ",\"insider_mspr\":%.4f,\"insider_buys\":%d,\"insider_sells\":%d"
                 + ",\"analyst_buy\":%d,\"analyst_hold\":%d,\"analyst_sell\":%d",
-                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, spreadShortStrike, strikeSell, icPutSell, icPutBuy, icCallSell, icCallBuy, targetExpiration,
+                sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, spreadShortStrike, strikeSell, targetExpiration, strategyName, optionsLine, emaCrossoverStatus, rsi14, calculatedSupport, calculatedResistance,
                 buyStrength, buyScore, sellScore, rsi14,
                 activeBuySignals, activeSellSignals,
                 smartMoneyScore, smartMoneyVerdict, smConflict,
@@ -683,6 +729,15 @@ public class McpServerConfig {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
             int customDays = request.customTradingDays() != null ? request.customTradingDays() : 0;
 
+            log.info("[STOCK_CALL] symbol={} customDays={}", ticker, customDays);
+
+            // Return cached result if fresh enough (60 s TTL — price moves slowly enough for repeated queries)
+            String cacheKey = ticker + ":" + customDays;
+            CachedScan stockCached = stockCache.get(cacheKey);
+            if (stockCached != null && Instant.now().minusSeconds(STOCK_CACHE_TTL_SECONDS).isBefore(stockCached.cachedAt())) {
+                return stockCached.json();
+            }
+
             // Ensure this ticker is being tracked by the WebSocket stream
             alpacaStreamService.subscribe(ticker);
 
@@ -730,8 +785,10 @@ public class McpServerConfig {
 
                 String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\",\"high_today\":%.2f,\"low_today\":%.2f}",
                         ticker, ticker, currentPrice, currentPrice - priorClose, pctString, String.format("%,d", vol), highToday, lowToday);
-                
-                return payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, customDays) + "}";
+
+                String result = payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, customDays) + "}";
+                stockCache.put(cacheKey, new CachedScan(result, Instant.now()));
+                return result;
             } catch (Exception e) {
                 return String.format("{\"error\":\"CRITICAL FAILURE: Exception parsing data streams for %s.\"}", ticker);
             }

@@ -2,6 +2,8 @@ package com.quant.agent;
 
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
@@ -64,7 +66,7 @@ public class TradingAgentService {
                     You are 'AlphaQuant', a friendly trading assistant. Explain everything like you are a knowledgeable friend helping someone understand the markets — no jargon, no acronyms unless you immediately explain them in plain words right after.
 
                     MANDATORY TOOL CALLING RULE:
-                    You MUST call 'stockPriceFunction' and 'historicalTrendFunction' for specific ticker inquiries. You MUST call 'generalMarketScannerFunction' for broad scans, top options, or trending lists. You MUST call 'preMarketScannerFunction' for pre-market queries. Never invent data.
+                    You MUST call 'stockPriceFunction' for specific ticker inquiries — it returns all technical data including trend, RSI, EMA crossover, and trade setup in one call. You MUST call 'generalMarketScannerFunction' for broad scans, top options, or trending lists. You MUST call 'preMarketScannerFunction' for pre-market queries. Never invent data. Never call a second function for more data on the same ticker.
 
                     PLAIN LANGUAGE TRANSLATION RULES — apply these everywhere, every time:
                     A. INDICATOR TRANSLATION:
@@ -82,12 +84,10 @@ public class TradingAgentService {
                        - -15 to +15 → "No Clear Direction ([score])"
                        - -60 to -15 → "Moderate Sell Signal ([score])"
                        - below -60  → "Very Strong Sell Signal ([score])"
-                    C. VERDICT TRANSLATION (automated_trade_verdict — NEVER show the raw tag):
-                       - EXECUTE_CALL_OR_LONG_SPREAD         → "Bull Call Debit Spread"
-                       - PREPARE_LONG_BUY_DIP_AT_VWAP        → "Bull Call Debit Spread"
-                       - EXECUTE_PUT_OR_SHORT_SPREAD          → "Bear Put Debit Spread"
-                       - PREPARE_SHORT_FADE_BOUNCE_AT_VWAP   → "Bear Put Debit Spread"
-                       - STAND_DOWN_COLLECT_PREMIUM           → "Iron Condor"
+                    C. VERDICT TRANSLATION (automated_trade_verdict — use strategy_name field instead, NEVER show raw tag):
+                       - EXECUTE_CALL_OR_LONG_SPREAD / PREPARE_LONG_BUY_DIP_AT_VWAP → entry timing is "execute now" or "wait for a dip"
+                       - EXECUTE_PUT_OR_SHORT_SPREAD / PREPARE_SHORT_FADE_BOUNCE_AT_VWAP → entry timing is "execute now" or "wait for a bounce"
+                       - STAND_DOWN_COLLECT_PREMIUM → no clear direction, collect range premium
                     D. BUY STRENGTH TRANSLATION (buy_strength — NEVER show the raw tag):
                        - STRONG_BUY  → "🔥 Strong Buy"
                        - BUY         → "✅ Buy"
@@ -119,7 +119,7 @@ public class TradingAgentService {
                     BOLD RULE: <b> on (1) ticker, (2) section headers, (3) verdict text, (4) trade price labels only.
 
                     <b style="color:[price color]">[SYMBOL] ($[current_price])</b>  |  [Short plain-English setup label]
-                    Checked: [time h:mm AM/PM z]  |  Trend: <span style="color:[ema color]">[Rule A]</span>  |  Momentum: [rsi_14d] — [RSI label]  |  Signal: [buy_score]↑ [sell_score]↓
+                    Checked: [time h:mm AM/PM z]  |  Trend: <span style="color:[#28a745 if ema_crossover_status Bullish/Bullish Cross, #dc3545 if Bearish/Bearish Cross, #ffc107 if Neutral]">[translate ema_crossover_status Rule A]</span>  |  Momentum: [calculated_rsi_14d] — [RSI label Rule A]  |  Signal: [buy_score]↑ [sell_score]↓
                     What to do: <b style="color:[verdict color]">[Rule C]</b> — [One sentence explaining why]
                     <b>[LIVE SNAPSHOT]</b>  |  [session_status]  |  [Rule B]  |  VWAP: $[intraday_vwap]  |  Vol: [volume]
                     Range: $[micro_support]–$[micro_resistance]  |  Change: <span style="color:[change color]">[percent_change]</span>  |  What to watch: [One action sentence]
@@ -128,23 +128,20 @@ public class TradingAgentService {
                     <b>[TREND]</b>
                     Daily: <span style="color:[daily color]">[Up ↑/Down ↓/Sideways →]</span>  |  1h: <span style="color:[1h color]">[Rising ↑/Falling ↓/Flat →]</span>  |  15m: <span style="color:[15m color]">[Pushing Up ↑/Pushing Down ↓/Flat →]</span>  |  5m: <span style="color:[5m color]">[Moving Up ↑/Moving Down ↓/Flat →]</span>
                     <b>[BUY OR SELL?]</b>  |  [Rule D]  |  ↑ Buy: [buy_score]/6  |  ↓ Sell: [sell_score]/6
-                    ↑ Buy case: [One sentence listing signals from active_buy_signals. If "none" write "No buy signals active."]
-                    ↓ Sell case: [One sentence listing signals from active_sell_signals. If "none" write "No sell signals active."]
+                    ↑ Buy case ([buy_score]/6): [active_buy_signals]
+                    ↓ Sell case ([sell_score]/6): [active_sell_signals]
                     <b>[SMART MONEY]</b>  |  [Rule E]  |  Insider MSPR: [insider_mspr 2dp]  |  Analysts: [analyst_buy] Buy · [analyst_hold] Hold · [analyst_sell] Sell
                     [if smart_money_conflict true:] ⚠️ Smart money and chart signals conflict — wait for alignment before committing full position.
                     [if false + ACCUMULATING:] ✅ Institutions and technicals agree — buy signal confirmed by big money.
                     [if false + DISTRIBUTING:] ✅ Institutions and technicals agree — sell signal confirmed by big money.
                     [if false + NEUTRAL:] Smart money is on the sidelines — rely on technicals.
                     <b>[TRADE SETUP]</b>
-                    <b style="color:[verdict color]">[Rule C — strategy name]</b> — [1-2 sentences: "execute now" for EXECUTE, "wait for dip/bounce" for PREPARE, "range-bound" for STAND_DOWN; mention smart money if relevant]
-                    [Output ONLY the matching price line:]
-                    [score > +15:] <b>Enter at:</b> $[final_entry]  |  <b>Take profit at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_entry−final_sl, 2dp] → Gain $[final_tp−final_entry, 2dp]
-                    [score < −15:] <b>Enter/Sell at:</b> $[final_entry]  |  <b>Cover at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_sl−final_entry, 2dp] → Gain $[final_entry−final_tp, 2dp]
-                    [between −15 and +15:] Watch: Break above $[micro_resistance] → buy  |  Drop below $[micro_support] → sell  |  Stop if holding: $[final_sl]
-                    [Output ONLY the matching Options line:]
-                    [EXECUTE_CALL_OR_LONG_SPREAD or PREPARE_LONG_BUY_DIP_AT_VWAP:] <b>Options</b> (Bull Call Debit Spread): Buy 1× $[strike_buy] Call · Sell 1× $[spread_short_strike] Call · Expires [target_expiration]
-                    [EXECUTE_PUT_OR_SHORT_SPREAD or PREPARE_SHORT_FADE_BOUNCE_AT_VWAP:] <b>Options</b> (Bear Put Debit Spread): Buy 1× $[strike_buy] Put · Sell 1× $[spread_short_strike] Put · Expires [target_expiration]
-                    [STAND_DOWN_COLLECT_PREMIUM:] <b>Options</b> (Iron Condor): Sell $[ic_put_sell] Put · Buy $[ic_put_buy] Put · Sell $[ic_call_sell] Call · Buy $[ic_call_buy] Call · Expires [target_expiration]
+                    <b style="color:[#28a745 if score>+15, #dc3545 if score<-15, #ffc107]">[strategy_name]</b> — [1-2 plain-English sentences on entry timing; mention smart money if relevant]
+                    [Output ONLY the matching price line — never print the condition label:]
+                    [If total_confluence_score > +15:] <b>Enter at:</b> $[final_entry]  |  <b>Take profit at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_entry−final_sl, 2dp] → Gain $[final_tp−final_entry, 2dp]
+                    [If total_confluence_score < −15:] <b>Enter/Sell at:</b> $[final_entry]  |  <b>Cover at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_sl−final_entry, 2dp] → Gain $[final_entry−final_tp, 2dp]
+                    [If between −15 and +15:] Watch: Break above $[micro_resistance] → buy  |  Drop below $[micro_support] → sell  |  Stop if holding: $[final_sl]
+                    <b>Options</b> ([strategy_name]): [options_line]
                     """;
 
     // ── Market scanner table — injected only for scan queries (~3 KB) ────────
@@ -204,19 +201,20 @@ public class TradingAgentService {
 
     public TradingAgentService(ChatClient.Builder chatClientBuilder) {
         this.chatClient = chatClientBuilder
-                .defaultTools("stockPriceFunction", "historicalTrendFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
+                .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
                 .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
     }
 
-    private String buildSystemPrompt(String enrichedInput) {
-        if (enrichedInput.contains("[Intent: Call preMarketScannerFunction")) {
-            return BASE_RULES + PRE_MARKET_TEMPLATE;
-        } else if (enrichedInput.contains("[Intent: Call generalMarketScannerFunction")) {
-            return BASE_RULES + SCANNER_TEMPLATE;
-        } else {
-            return BASE_RULES + STOCK_TEMPLATE;
-        }
+    // Pre-loads the model into Metal GPU memory so the first real query has no cold-start penalty.
+    @EventListener(ApplicationReadyEvent.class)
+    public void warmupModel() {
+        Schedulers.boundedElastic().schedule(() -> {
+            try {
+                this.chatClient.prompt().user("/no_think hi").call().content();
+            } catch (Exception ignored) {}
+        });
     }
 
     // ── Intent detection ──────────────────────────────────────────────────────
@@ -259,9 +257,9 @@ public class TradingAgentService {
             return raw + "\n\n[Intent: Call generalMarketScannerFunction — user wants a broad market scan]";
         }
 
-        // Trend / technicals intent with a specific ticker
+        // Trend / technicals intent with a specific ticker — stockPriceFunction includes all these fields
         if (ticker != null && lower.matches(".*\\b(trend|rsi|ema|technical|chart|signal|momentum|macd|sma).*")) {
-            return raw + "\n\n[Intent: Call historicalTrendFunction for " + ticker + " — user wants technical indicators]";
+            return raw + "\n\n[Intent: Call stockPriceFunction for " + ticker + " and render Dashboard Output Template — user wants technical indicators]";
         }
 
         // Bare ticker — user typed just a symbol (or symbol + a few words)
@@ -288,15 +286,13 @@ public class TradingAgentService {
     }
 
     public Flux<String> streamAgentResponse(String input) {
-        // Spring AI M6 + Ollama: .stream() with registered tools triggers a null evalDuration
-        // NPE in MessageAggregator. Use blocking .call() on a bounded-elastic thread instead.
+        // OllamaChatModel.from() throws NPE on evalDuration=null for non-final streaming chunks
+        // (present in Spring AI 1.0.0). Use blocking .call() on a bounded-elastic thread.
         return Flux.concat(
             Flux.just("__PROGRESS__:Fetching live market data..."),
             Flux.defer(() -> {
-                String enriched = injectDynamicContext(input);
                 String response = this.chatClient.prompt()
-                        .system(buildSystemPrompt(enriched))
-                        .user(enriched)
+                        .user(injectDynamicContext(input))
                         .call()
                         .content();
                 if (response == null || response.isBlank()) {
