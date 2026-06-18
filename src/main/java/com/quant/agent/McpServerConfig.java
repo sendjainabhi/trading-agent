@@ -3,8 +3,6 @@ package com.quant.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Description;
@@ -30,16 +28,12 @@ import java.util.function.Function;
 @Configuration
 public class McpServerConfig {
 
-    private static final Logger log = LoggerFactory.getLogger(McpServerConfig.class);
-
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     private record CachedScan(String json, Instant cachedAt) {}
-    private final ConcurrentHashMap<String, CachedScan> scanCache  = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, CachedScan> stockCache = new ConcurrentHashMap<>();
-    private static final long SCAN_CACHE_TTL_SECONDS  = 30;
-    private static final long STOCK_CACHE_TTL_SECONDS = 60;
+    private final ConcurrentHashMap<String, CachedScan> scanCache = new ConcurrentHashMap<>();
+    private static final long SCAN_CACHE_TTL_SECONDS = 30;
 
     @Value("${alpaca.api.key}")
     private String apiKey;
@@ -729,15 +723,6 @@ public class McpServerConfig {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
             int customDays = request.customTradingDays() != null ? request.customTradingDays() : 0;
 
-            log.info("[STOCK_CALL] symbol={} customDays={}", ticker, customDays);
-
-            // Return cached result if fresh enough (60 s TTL — price moves slowly enough for repeated queries)
-            String cacheKey = ticker + ":" + customDays;
-            CachedScan stockCached = stockCache.get(cacheKey);
-            if (stockCached != null && Instant.now().minusSeconds(STOCK_CACHE_TTL_SECONDS).isBefore(stockCached.cachedAt())) {
-                return stockCached.json();
-            }
-
             // Ensure this ticker is being tracked by the WebSocket stream
             alpacaStreamService.subscribe(ticker);
 
@@ -787,7 +772,6 @@ public class McpServerConfig {
                         ticker, ticker, currentPrice, currentPrice - priorClose, pctString, String.format("%,d", vol), highToday, lowToday);
 
                 String result = payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, customDays) + "}";
-                stockCache.put(cacheKey, new CachedScan(result, Instant.now()));
                 return result;
             } catch (Exception e) {
                 return String.format("{\"error\":\"CRITICAL FAILURE: Exception parsing data streams for %s.\"}", ticker);

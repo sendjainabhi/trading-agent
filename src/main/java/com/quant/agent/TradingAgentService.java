@@ -2,8 +2,6 @@ package com.quant.agent;
 
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
@@ -205,16 +203,6 @@ public class TradingAgentService {
                 .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
                 .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
-    }
-
-    // Pre-loads the model into Metal GPU memory so the first real query has no cold-start penalty.
-    @EventListener(ApplicationReadyEvent.class)
-    public void warmupModel() {
-        Schedulers.boundedElastic().schedule(() -> {
-            try {
-                this.chatClient.prompt().user("/no_think hi").call().content();
-            } catch (Exception ignored) {}
-        });
     }
 
     // ── Intent detection ──────────────────────────────────────────────────────

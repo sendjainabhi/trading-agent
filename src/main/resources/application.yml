@@ -11,9 +11,6 @@ spring:
         options:
           model: qwen3.6:35b
           temperature: 0.0
-          num-ctx: 8192
-          num-thread: 10
-          num-gpu: 999
 
 
 alpaca:
