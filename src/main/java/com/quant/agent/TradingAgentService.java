@@ -1,36 +1,68 @@
 package com.quant.agent;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.ai.anthropic.AnthropicChatModel;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.api.AnthropicApi;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
+import org.springframework.ai.model.tool.ToolCallingManager;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
+import java.io.File;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
 public class TradingAgentService {
 
+    private static final Logger log = LoggerFactory.getLogger(TradingAgentService.class);
+
     // ── Intent detection constants ────────────────────────────────────────────
 
     private static final Pattern TICKER_PATTERN =
             Pattern.compile("(?<![A-Za-z])\\$?([A-Z]{1,5})(?![A-Za-z])");
 
-    // Common uppercase words that are NOT tickers
+    // Common uppercase words that are NOT tickers — keep in sync with JS TICKER_STOP
     private static final Set<String> TICKER_STOP_WORDS = Set.of(
-            "A", "I", "AM", "AT", "BE", "BY", "DO", "GO", "HI", "IF", "IN", "IS", "IT",
-            "ME", "MY", "NO", "OF", "ON", "OR", "SO", "TO", "UP", "US", "WE", "AI",
-            "OK", "AN", "AS", "TV", "PM", "IM", "ETF", "CEO", "CFO", "CTO", "IPO",
+            "A", "I", "AM", "AN", "AT", "BE", "BY", "DO", "GO", "HI", "IF", "IN", "IS", "IT",
+            "ME", "MY", "NO", "OF", "OK", "ON", "OR", "SO", "TO", "UP", "US", "WE", "AI", "VS",
+            "AS", "TV", "PM", "IM", "ETF", "CEO", "CFO", "CTO", "IPO", "OTC", "SEC", "FED",
+            "GDP", "IRS", "ISM", "EMA", "RSI", "ATR", "SMA", "VWAP", "ATH", "ATL",
             "AND", "ARE", "BUT", "CAN", "FOR", "GET", "HAS", "HOW", "NOW", "THE",
             "ALL", "BUY", "TOP", "RUN", "ASK", "BIG", "HIT", "SET", "USE", "ANY",
-            "SEC", "FED", "GDP", "IRS", "ISM", "EMA", "RSI", "ATR", "SMA", "VWAP"
+            // scanner / directive words that appear uppercase but are not tickers
+            "SCAN", "SHOW", "SELL", "FIND", "GIVE", "LAST", "LIVE", "JUST",
+            "WHAT", "WHEN", "WITH", "MOST", "BEST", "FROM", "HIGH", "LOW",
+            "HOT", "NEW", "PRE", "POST", "MORE", "LESS", "ALSO", "OPEN",
+            "YTD", "MTD", "QTD"
     );
 
     // Well-known company names → ticker (handles natural language like "analyze Tesla")
@@ -57,7 +89,59 @@ public class TradingAgentService {
             Map.entry("rivian",    "RIVN")
     );
 
-    private final ChatClient chatClient;
+    // ── Provider management ───────────────────────────────────────────────────
+
+    @Autowired
+    private ToolCallingManager toolCallingManager;
+
+    private final ChatClient.Builder ollamaClientBuilder;
+    private final Map<String, ChatClient> providerClients = new ConcurrentHashMap<>();
+    private volatile ChatClient activeChatClient;
+    private volatile String activeProvider    = "ollama";
+    private volatile String activeModel;
+    private volatile float  activeTemperature = 0.0f;
+    private volatile String activeApiKey      = "";
+    private volatile String activeBaseUrl     = "";
+
+    // Persisted to the workspace parent directory (one level above trading-agent/)
+    private static final String SAVED_CONFIG_PATH =
+            java.nio.file.Paths.get(System.getProperty("user.dir", "."))
+                    .getParent().resolve("agent-config.json").toString();
+
+    @Value("${spring.ai.ollama.base-url:http://127.0.0.1:11434}")
+    private String ollamaBaseUrl;
+
+    @Value("${spring.ai.ollama.chat.options.model:qwen3:30b}")
+    private String defaultOllamaModel;
+
+    @Value("${spring.ai.openai.api-key:}")
+    private String openAiKey;
+
+    @Value("${spring.ai.openai.base-url:https://api.openai.com}")
+    private String defaultOpenAiBaseUrl;
+
+    @Value("${spring.ai.openai.chat.options.model:gpt-4o}")
+    private String defaultOpenAiModel;
+
+    private volatile String runtimeOpenAiBaseUrl;
+    private volatile String runtimeOpenAiKey;
+
+    @Value("${spring.ai.anthropic.api-key:}")
+    private String anthropicKey;
+
+    @Value("${spring.ai.anthropic.base-url:https://api.anthropic.com}")
+    private String defaultAnthropicBaseUrl;
+
+    private volatile String runtimeAnthropicBaseUrl;
+    private volatile String runtimeAnthropicKey;
+
+    @Value("${spring.ai.anthropic.chat.options.model:claude-sonnet-4-6}")
+    private String defaultAnthropicModel;
+
+    private final HttpClient statusHttpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
+    private final ObjectMapper statusMapper = new ObjectMapper();
 
     // ── Base rules sent on every request (~4 KB) ──────────────────────────────
     private static final String BASE_RULES = """
@@ -198,11 +282,348 @@ public class TradingAgentService {
                     """;
 
     public TradingAgentService(ChatClient.Builder chatClientBuilder) {
-        this.chatClient = chatClientBuilder
+        this.ollamaClientBuilder = chatClientBuilder
                 .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
+                .defaultAdvisors(new SimpleLoggerAdvisor());
+    }
+
+    @PostConstruct
+    public void initProviders() {
+        this.activeModel = defaultOllamaModel;
+        ChatClient ollamaClient = ollamaClientBuilder.build();
+        providerClients.put("ollama", ollamaClient);
+        activeChatClient = ollamaClient;
+        tryInitOpenAi(openAiKey, defaultOpenAiModel, defaultOpenAiBaseUrl);
+        tryInitAnthropic(anthropicKey, defaultAnthropicModel, defaultAnthropicBaseUrl);
+        loadSavedConfig();
+    }
+
+    private void loadSavedConfig() {
+        File f = new File(SAVED_CONFIG_PATH);
+        if (!f.exists()) return;
+        try {
+            Map<String, String> config = statusMapper.readValue(f, new TypeReference<Map<String, String>>() {});
+            if (!config.isEmpty()) {
+                updateModelConfig(config);
+                log.info("Restored model config from {}", SAVED_CONFIG_PATH);
+            }
+        } catch (Exception e) {
+            log.warn("Could not load saved config from {}: {}", SAVED_CONFIG_PATH, e.getMessage());
+        }
+    }
+
+    private void saveCurrentConfig() {
+        try {
+            Map<String, String> config = new HashMap<>();
+            config.put("provider",    activeProvider);
+            config.put("model",       activeModel);
+            config.put("apiKey",      activeApiKey);
+            config.put("baseUrl",     activeBaseUrl);
+            config.put("temperature", String.valueOf(activeTemperature));
+            statusMapper.writerWithDefaultPrettyPrinter().writeValue(new File(SAVED_CONFIG_PATH), config);
+            log.info("Saved model config — provider: {}, model: {}", activeProvider, activeModel);
+        } catch (Exception e) {
+            log.warn("Could not save config to {}: {}", SAVED_CONFIG_PATH, e.getMessage());
+        }
+    }
+
+    public Map<String, Object> testProviderConfig(Map<String, String> config) {
+        String provider = config.getOrDefault("provider", "").toLowerCase();
+        String apiKey   = config.getOrDefault("apiKey",   "");
+        String baseUrl  = config.getOrDefault("baseUrl",  "");
+
+        if ("ollama".equals(provider)) {
+            String url = isValidUrl(baseUrl) ? baseUrl : ollamaBaseUrl;
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(url + "/api/tags"))
+                        .timeout(Duration.ofSeconds(5))
+                        .GET().build();
+                int status = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString()).statusCode();
+                return status == 200
+                        ? Map.of("connected", true)
+                        : Map.of("connected", false, "error", "Ollama returned HTTP " + status);
+            } catch (Exception e) {
+                return Map.of("connected", false, "error", "Cannot reach Ollama at " + url + ": " + e.getMessage());
+            }
+        }
+
+        if ("openai".equals(provider) || "anthropic".equals(provider)) {
+            // Fall back to stored runtime key when form left the key field blank (e.g. after file upload)
+            String resolvedKey = isValidKey(apiKey) ? apiKey
+                    : ("openai".equals(provider) ? runtimeOpenAiKey : runtimeAnthropicKey);
+            String resolvedUrl = isValidUrl(baseUrl) ? baseUrl
+                    : ("openai".equals(provider) ? runtimeOpenAiBaseUrl : runtimeAnthropicBaseUrl);
+            if (!isValidKey(resolvedKey)) return Map.of("connected", false, "error", "API key is required");
+            if (!isValidUrl(resolvedUrl)) return Map.of("connected", false, "error", "Base URL is required");
+            String model = config.getOrDefault("model", "");
+            if (model.isBlank()) return Map.of("connected", false, "error", "Model name is required");
+
+            // Send a minimal chat completion to verify BOTH connectivity and model availability.
+            // GET /v1/models is unreliable on enterprise proxies — they often return 404/405 even
+            // when the chat endpoint works fine, so this POST gives a definitive answer.
+            try {
+                String chatUrl = resolvedUrl.endsWith("/")
+                        ? resolvedUrl + "v1/chat/completions"
+                        : resolvedUrl + "/v1/chat/completions";
+                String safeModel = model.replace("\\", "\\\\").replace("\"", "\\\"");
+                String body = "{\"model\":\"" + safeModel + "\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}";
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(chatUrl))
+                        .header("Authorization", "Bearer " + resolvedKey)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .timeout(Duration.ofSeconds(20))
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build();
+                HttpResponse<String> resp = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                int status = resp.statusCode();
+                if (status == 200 || status == 201) return Map.of("connected", true);
+                if (status == 401) return Map.of("connected", false, "error", "Invalid API key (401 Unauthorized)");
+                if (status == 403) return Map.of("connected", false, "error", "Access forbidden (403)");
+                if (status == 429) return Map.of("connected", false, "error", "Rate limit exceeded — try again later");
+                if (status == 404) {
+                    String respBody = resp.body() != null ? resp.body() : "";
+                    if (respBody.contains("model_not_found")) {
+                        return Map.of("connected", false, "error",
+                                "Model '" + model + "' not found — verify the model name with your provider");
+                    }
+                    return Map.of("connected", false, "error",
+                            "Endpoint not found (404) — verify the base URL");
+                }
+                return Map.of("connected", false, "error", "Server returned HTTP " + status);
+            } catch (Exception e) {
+                return Map.of("connected", false, "error", "Connection error: " + e.getMessage());
+            }
+        }
+
+        return Map.of("connected", false, "error", "Unknown provider: " + provider);
+    }
+
+    public Map<String, Object> testProviderConnection() {
+        if ("ollama".equals(activeProvider)) {
+            boolean ok = checkOllamaReachable();
+            return ok ? Map.of("connected", true)
+                      : Map.of("connected", false, "error", "Cannot reach Ollama at " + ollamaBaseUrl);
+        }
+        if (!providerClients.containsKey(activeProvider)) {
+            return Map.of("connected", false, "error",
+                    "No API key configured — upload a config file or enter the key in settings");
+        }
+        String baseUrl = "openai".equals(activeProvider) ? runtimeOpenAiBaseUrl : runtimeAnthropicBaseUrl;
+        String key     = "openai".equals(activeProvider) ? runtimeOpenAiKey     : runtimeAnthropicKey;
+        if (baseUrl == null || key == null) {
+            return Map.of("connected", false, "error", "Provider not fully configured");
+        }
+        try {
+            String testUrl = baseUrl.endsWith("/") ? baseUrl + "v1/models" : baseUrl + "/v1/models";
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(testUrl))
+                    .header("Authorization", "Bearer " + key)
+                    .header("Accept", "application/json")
+                    .timeout(Duration.ofSeconds(10))
+                    .GET().build();
+            int status = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString()).statusCode();
+            if (status == 200) return Map.of("connected", true);
+            if (status == 401) return Map.of("connected", false, "error", "Invalid API key (401 Unauthorized)");
+            if (status == 403) return Map.of("connected", false, "error", "Access forbidden (403)");
+            // Some OpenAI-compatible proxies don't expose /v1/models — treat 404/405 as "likely OK"
+            if (status == 404 || status == 405)
+                return Map.of("connected", true, "warning",
+                        "Models list not available (" + status + ") — chat should still work");
+            return Map.of("connected", false, "error", "Server returned HTTP " + status);
+        } catch (Exception e) {
+            return Map.of("connected", false, "error", "Connection error: " + e.getMessage());
+        }
+    }
+
+    // ── Provider initialisation helpers ──────────────────────────────────────
+
+    private ChatClient wrapWithDefaults(ChatClient.Builder b) {
+        return b.defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE)
                 .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
                 .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
+    }
+
+    private void tryInitOpenAi(String key, String model, String baseUrl) {
+        if (!isValidKey(key)) return;
+        try {
+            String resolvedUrl = isValidUrl(baseUrl) ? baseUrl : defaultOpenAiBaseUrl;
+            OpenAiApi api = OpenAiApi.builder()
+                    .apiKey(key)
+                    .baseUrl(resolvedUrl)
+                    .build();
+            OpenAiChatOptions options = OpenAiChatOptions.builder()
+                    .model(model)
+                    .temperature(0.0)
+                    .build();
+            OpenAiChatModel chatModel = OpenAiChatModel.builder()
+                    .openAiApi(api)
+                    .defaultOptions(options)
+                    .toolCallingManager(toolCallingManager)
+                    .build();
+            providerClients.put("openai", wrapWithDefaults(ChatClient.builder(chatModel)));
+            runtimeOpenAiBaseUrl = resolvedUrl;
+            runtimeOpenAiKey = key;
+            log.info("OpenAI provider ready — model: {}, url: {}", model, resolvedUrl);
+        } catch (Exception e) {
+            log.warn("OpenAI init failed: {}", e.getMessage());
+        }
+    }
+
+    private void tryInitAnthropic(String key, String model, String baseUrl) {
+        if (!isValidKey(key)) return;
+        try {
+            String resolvedUrl = isValidUrl(baseUrl) ? baseUrl : defaultAnthropicBaseUrl;
+            AnthropicApi api = AnthropicApi.builder()
+                    .apiKey(key)
+                    .baseUrl(resolvedUrl)
+                    .build();
+            AnthropicChatOptions options = AnthropicChatOptions.builder()
+                    .model(model)
+                    .temperature(0.0)
+                    .build();
+            AnthropicChatModel chatModel = AnthropicChatModel.builder()
+                    .anthropicApi(api)
+                    .defaultOptions(options)
+                    .toolCallingManager(toolCallingManager)
+                    .build();
+            providerClients.put("anthropic", wrapWithDefaults(ChatClient.builder(chatModel)));
+            runtimeAnthropicBaseUrl = resolvedUrl;
+            runtimeAnthropicKey = key;
+            log.info("Anthropic provider ready — model: {}, url: {}", model, baseUrl);
+        } catch (Exception e) {
+            log.warn("Anthropic init failed: {}", e.getMessage());
+        }
+    }
+
+    private static boolean isValidUrl(String url) {
+        return url != null && !url.isBlank() && (url.startsWith("http://") || url.startsWith("https://"));
+    }
+
+    private static boolean isValidKey(String key) {
+        return key != null && !key.isBlank() && !key.startsWith("${");
+    }
+
+    // ── Model management (called by TradingAgentController) ───────────────────
+
+    public Map<String, Object> getModelStatus() {
+        Map<String, Object> r = new HashMap<>();
+        r.put("provider", activeProvider);
+        r.put("model", activeModel);
+        r.put("temperature", activeTemperature);
+        r.put("connected", checkConnected());
+        r.put("availableProviders", new ArrayList<>(providerClients.keySet()));
+        r.put("ollamaBaseUrl", ollamaBaseUrl);
+        r.put("openAiBaseUrl", runtimeOpenAiBaseUrl != null ? runtimeOpenAiBaseUrl : defaultOpenAiBaseUrl);
+        r.put("anthropicBaseUrl", runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl);
+        if ("ollama".equals(activeProvider)) r.put("ollamaModels", getOllamaModels());
+        return r;
+    }
+
+    public Map<String, Object> getModelConfig() {
+        Map<String, Object> r = new HashMap<>();
+        r.put("provider", activeProvider);
+        r.put("model", activeModel);
+        r.put("temperature", activeTemperature);
+        r.put("ollamaBaseUrl", ollamaBaseUrl);
+        r.put("openAiBaseUrl", runtimeOpenAiBaseUrl != null ? runtimeOpenAiBaseUrl : defaultOpenAiBaseUrl);
+        r.put("anthropicBaseUrl", runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl);
+        r.put("availableProviders", new ArrayList<>(providerClients.keySet()));
+        r.put("openAiConfigured", providerClients.containsKey("openai"));
+        r.put("anthropicConfigured", providerClients.containsKey("anthropic"));
+        return r;
+    }
+
+    public synchronized Map<String, Object> updateModelConfig(Map<String, String> config) {
+        String provider = config.getOrDefault("provider", activeProvider).toLowerCase();
+        String model    = config.getOrDefault("model", activeModel);
+        String apiKey   = config.getOrDefault("apiKey", "");
+        String baseUrl  = config.getOrDefault("baseUrl", "");
+        float  temp     = parseFloat(config.get("temperature"), activeTemperature);
+
+        if (!List.of("ollama", "openai", "anthropic").contains(provider)) {
+            return Map.of("success", false, "error", "Unknown provider: " + provider);
+        }
+
+        // Reinitialise when a new key is supplied, or when the base URL changes
+        if (!apiKey.isBlank() || !baseUrl.isBlank()) {
+            if ("openai".equals(provider))
+                tryInitOpenAi(apiKey.isBlank() ? openAiKey : apiKey, model,
+                              baseUrl.isBlank() ? defaultOpenAiBaseUrl : baseUrl);
+            if ("anthropic".equals(provider))
+                tryInitAnthropic(apiKey.isBlank() ? anthropicKey : apiKey, model,
+                                 baseUrl.isBlank() ? defaultAnthropicBaseUrl : baseUrl);
+        }
+
+        if (!providerClients.containsKey(provider)) {
+            return Map.of("success", false, "error",
+                    "Provider '" + provider + "' is not configured. Provide an API key.");
+        }
+
+        activeProvider    = provider;
+        activeModel       = model;
+        activeTemperature = temp;
+        activeApiKey      = switch (provider) {
+            case "openai"    -> runtimeOpenAiKey     != null ? runtimeOpenAiKey     : "";
+            case "anthropic" -> runtimeAnthropicKey  != null ? runtimeAnthropicKey  : "";
+            default          -> "";
+        };
+        activeBaseUrl     = switch (provider) {
+            case "openai"    -> runtimeOpenAiBaseUrl    != null ? runtimeOpenAiBaseUrl    : defaultOpenAiBaseUrl;
+            case "anthropic" -> runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl;
+            default          -> ollamaBaseUrl;
+        };
+        activeChatClient  = providerClients.get(provider);
+        saveCurrentConfig();
+
+        return Map.of("success", true, "provider", activeProvider,
+                "model", activeModel, "connected", checkConnected(),
+                "temperature", activeTemperature);
+    }
+
+    private boolean checkConnected() {
+        return switch (activeProvider) {
+            case "openai"    -> providerClients.containsKey("openai");
+            case "anthropic" -> providerClients.containsKey("anthropic");
+            default -> checkOllamaReachable();
+        };
+    }
+
+    private boolean checkOllamaReachable() {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(ollamaBaseUrl + "/api/tags"))
+                    .timeout(Duration.ofSeconds(3))
+                    .GET().build();
+            return statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString()).statusCode() == 200;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private List<String> getOllamaModels() {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(ollamaBaseUrl + "/api/tags"))
+                    .timeout(Duration.ofSeconds(5))
+                    .GET().build();
+            HttpResponse<String> res = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() != 200) return List.of();
+            JsonNode models = statusMapper.readTree(res.body()).path("models");
+            List<String> names = new ArrayList<>();
+            for (JsonNode m : models) names.add(m.path("name").asText());
+            return names;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private static float parseFloat(String val, float fallback) {
+        if (val == null || val.isBlank()) return fallback;
+        try { return Float.parseFloat(val); } catch (NumberFormatException e) { return fallback; }
     }
 
     // ── Intent detection ──────────────────────────────────────────────────────
@@ -233,33 +654,41 @@ public class TradingAgentService {
     private String enrichPrompt(String raw) {
         String lower = raw.toLowerCase(Locale.US);
 
-        // Pre-market intent — check before general scan (more specific)
+        // 1. Pre-market intent — most specific, check first
         if (lower.matches(".*\\b(pre.?market|premarket|before.?open|gap.?up|gap.?down|gap.?play|gapping|early.?mover|overnight.?move|pm.?scan|pm.?mover).*")
                 || lower.matches(".*(what.*(moving|movin|gapping|active).*(pre|before|early|overnight)).*")) {
+            log.info("[INTENT] preMarketScanner");
             return raw + "\n\n[Intent: Call preMarketScannerFunction — user wants pre-market movers and gap patterns]";
         }
 
-        // General scanner intent (no specific ticker in sight)
+        // 2. Ticker extraction — happens after pre-market so stop-words filter runs cleanly
         String ticker = extractTicker(raw);
+
+        // 3. General scanner — wins when no specific ticker is present
         if (ticker == null && lower.matches(".*\\b(scan|scanner|market.?mover|most.?active|trending|top.?pick|hot.?stock|broad.?scan|watch.?list|top.?option|what.*trade|what.*buy|what.*play|what.*watch|movers?.?today|what.*moving).*")) {
+            log.info("[INTENT] generalMarketScanner");
             return raw + "\n\n[Intent: Call generalMarketScannerFunction — user wants a broad market scan]";
         }
 
-        // Trend / technicals intent with a specific ticker — stockPriceFunction includes all these fields
+        // 4. Trend / technicals with a specific ticker
         if (ticker != null && lower.matches(".*\\b(trend|rsi|ema|technical|chart|signal|momentum|macd|sma).*")) {
+            log.info("[INTENT] stockPrice ticker={} (technicals)", ticker);
             return raw + "\n\n[Intent: Call stockPriceFunction for " + ticker + " and render Dashboard Output Template — user wants technical indicators]";
         }
 
-        // Bare ticker — user typed just a symbol (or symbol + a few words)
+        // 5. Bare ticker — user typed just a symbol (or symbol + a few words)
         if (ticker != null && raw.trim().length() <= ticker.length() + 25) {
+            log.info("[INTENT] stockPrice ticker={} (bare)", ticker);
             return raw + "\n\n[Intent: Call stockPriceFunction for " + ticker + " and render Dashboard Output Template]";
         }
 
-        // Named ticker with analysis intent
+        // 6. Named ticker with analysis intent
         if (ticker != null && lower.matches(".*\\b(analyze|analysis|look at|check|price|trade|buy|sell|option|call|put|short|long|what.*(doing|think|say|look)).*")) {
+            log.info("[INTENT] stockPrice ticker={} (analysis)", ticker);
             return raw + "\n\n[Intent: Call stockPriceFunction for " + ticker + " and render Dashboard Output Template]";
         }
 
+        log.info("[INTENT] none — ticker={} raw routing", ticker);
         return raw;
     }
 
@@ -274,20 +703,62 @@ public class TradingAgentService {
     }
 
     public Flux<String> streamAgentResponse(String input) {
-        // OllamaChatModel.from() throws NPE on evalDuration=null for non-final streaming chunks
-        // (present in Spring AI 1.0.0). Use blocking .call() on a bounded-elastic thread.
         return Flux.concat(
             Flux.just("__PROGRESS__:Fetching live market data..."),
             Flux.defer(() -> {
-                String response = this.chatClient.prompt()
-                        .user(injectDynamicContext(input))
-                        .call()
-                        .content();
+                ChatClient client = activeChatClient != null
+                        ? activeChatClient
+                        : providerClients.get("ollama");
+                if (client == null) {
+                    return Flux.just("### Configuration Error\nNo AI provider is configured. Open Settings to set up a model.");
+                }
+
+                log.info("[REQUEST] provider={} model={} input=\"{}\"",
+                        activeProvider, activeModel,
+                        input.length() > 120 ? input.substring(0, 120) + "…" : input);
+
+                long t0 = System.currentTimeMillis();
+                var promptSpec = client.prompt().user(injectDynamicContext(input));
+                String response = switch (activeProvider) {
+                    case "openai"    -> promptSpec.options(
+                                            OpenAiChatOptions.builder().model(activeModel).build()
+                                        ).call().content();
+                    case "anthropic" -> promptSpec.options(
+                                            AnthropicChatOptions.builder().model(activeModel).maxTokens(8096).build()
+                                        ).call().content();
+                    default          -> promptSpec.call().content();
+                };
+                log.info("[RESPONSE] provider={} model={} elapsed={}ms chars={}",
+                        activeProvider, activeModel,
+                        System.currentTimeMillis() - t0,
+                        response == null ? 0 : response.length());
+
                 if (response == null || response.isBlank()) {
                     return Flux.just("### Pipeline Delay\nMarket processing streams returned empty data frames.");
                 }
                 return Flux.just(response);
             }).subscribeOn(Schedulers.boundedElastic())
-        ).onErrorResume(e -> Flux.just("### Pipeline Interruption\nAnalysis crashed: " + e.getMessage()));
+        ).onErrorResume(e -> {
+            log.error("[ERROR] provider={} model={} error={}", activeProvider, activeModel, e.getMessage());
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("model_not_found") || msg.contains("model not found")) {
+                return Flux.just("### Model Not Found\n" +
+                        "The model **" + activeModel + "** was not found at the configured endpoint.\n\n" +
+                        "**To fix:** click ⚙ → Edit → update **Model Name** → Test Connection → Save & Apply.");
+            }
+            if (msg.contains("401") || msg.contains("Unauthorized")) {
+                return Flux.just("### Authentication Failed\n" +
+                        "Your API key was rejected. Click ⚙ → Edit and update the API key.");
+            }
+            if (msg.contains("403") || msg.contains("Forbidden")) {
+                return Flux.just("### Access Denied\n" +
+                        "The endpoint returned 403 Forbidden. Your account may not have access to this model or endpoint.");
+            }
+            if (msg.contains("Connection refused") || msg.contains("connect timed out") || msg.contains("UnknownHost")) {
+                return Flux.just("### Connection Failed\n" +
+                        "Cannot reach the provider. Click ⚙ → Edit and verify the **Endpoint URL**.");
+            }
+            return Flux.just("### Error\n" + msg);
+        });
     }
 }

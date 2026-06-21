@@ -3,6 +3,8 @@ package com.quant.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Description;
@@ -27,6 +29,8 @@ import java.util.function.Function;
 
 @Configuration
 public class McpServerConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(McpServerConfig.class);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -722,6 +726,7 @@ public class McpServerConfig {
         return request -> {
             String ticker = request.symbol().replaceAll("[\"']", "").trim().toUpperCase();
             int customDays = request.customTradingDays() != null ? request.customTradingDays() : 0;
+            log.info("[TOOL] stockPriceFunction called — ticker={}, customDays={}", ticker, customDays);
 
             // Ensure this ticker is being tracked by the WebSocket stream
             alpacaStreamService.subscribe(ticker);
@@ -971,6 +976,7 @@ public class McpServerConfig {
     @Description("USE THIS tool when the user asks about pre-market movers, gap plays, what to watch before the open, or pre-market scanner. Scans a curated watchlist for pre-market price movement and pattern (Gap & Go, Gap & Fade, Consolidating). Returns top movers with full options analysis — render results as a pre-market table.")
     public Function<EmptyRequest, String> preMarketScannerFunction() {
         return request -> {
+            log.info("[TOOL] preMarketScannerFunction called");
             try {
                 List<String> watchlist = new ArrayList<>(List.of(
                         "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "AMD",
@@ -1031,6 +1037,7 @@ public class McpServerConfig {
     @Description("USE THIS tool when the user asks for top options plays, trending tickers, market movers, or a broad market scan. Returns full multi-timeframe analysis and options levels for the top 5 trending US stocks — render results as a table.")
     public Function<EmptyRequest, String> generalMarketScannerFunction() {
         return request -> {
+            log.info("[TOOL] generalMarketScannerFunction called");
             try {
                 // 1. Fetch most-active tickers by volume (more reliable than trending/social buzz)
                 //    Fall back to trending if screener is unavailable

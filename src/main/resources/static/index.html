@@ -3,442 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AlphaQuant Assistant</title>
+    <title>Trading Agent</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <style>
-        :root {
-            --bg-page: #f4f7f6;
-            --bg-chat: #ffffff;
-            --primary-blue: #0056b3;
-            --secondary-blue: #007bff;
-            --text-dark: #333333;
-            --text-light: #ffffff;
-            --bubble-agent: #f8f9fa;
-            --border-light: #e9ecef;
-            --bullish-green: #28a745;
-            --bearish-red: #dc3545;
-        }
-
-        body {
-            background-color: var(--bg-page);
-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            margin: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100dvh;
-            color: var(--text-dark);
-            overflow: hidden;
-        }
-
-        .chat-container {
-            width: 96%;
-            max-width: 1500px;
-            height: 94dvh;
-            background-color: var(--bg-chat);
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
-
-        header {
-            background-color: var(--primary-blue);
-            color: var(--text-light);
-            padding: 16px 20px;
-            text-align: center;
-            font-size: 1.2rem;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            z-index: 10;
-        }
-
-        .subtitle {
-            font-size: 0.8rem;
-            font-weight: 400;
-            opacity: 0.8;
-            margin-top: 4px;
-        }
-
-        #chat-window {
-            flex-grow: 1;
-            padding: 24px;
-            overflow-y: auto;
-            overflow-x: hidden; 
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            background-color: var(--bg-chat);
-        }
-
-        .message {
-            max-width: 100%;
-            padding: 14px 18px;
-            border-radius: 12px;
-            line-height: 1.6;
-            font-size: 0.95rem; 
-            animation: fadeIn 0.3s ease-in-out;
-            white-space: pre-wrap;
-            overflow-wrap: break-word;
-            word-break: break-word;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        .message.user {
-            align-self: flex-end;
-            background-color: var(--secondary-blue);
-            color: var(--text-light);
-            border-bottom-right-radius: 4px;
-            max-width: 80%;
-        }
-
-        .message.agent {
-            align-self: flex-start;
-            background-color: var(--bubble-agent);
-            color: var(--text-dark);
-            border: 1px solid var(--border-light);
-            border-bottom-left-radius: 4px;
-            width: 100%;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.02);
-        }
-
-        .message.agent h3 {
-            font-size: 1.1rem;
-            margin-top: 6px;
-            margin-bottom: 10px;
-        }
-
-        .message.agent hr {
-            margin: 12px 0;
-            border: 0;
-            border-top: 1px solid var(--border-light);
-        }
-
-        .table-scroll {
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-            margin: 16px 0;
-        }
-
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            table-layout: fixed;
-            min-width: 700px;
-            background-color: var(--bg-chat);
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 0 0 1px var(--border-light);
-            font-size: 0.9rem;
-        }
-        
-        th, td {
-            border: 1px solid var(--border-light);
-            padding: 12px 16px;
-            text-align: left;
-            overflow-wrap: break-word;
-            word-break: break-word;
-        }
-        
-        th {
-            background-color: #f1f3f5;
-            color: var(--primary-blue);
-            font-weight: 600;
-        }
-
-        tr:nth-child(even) { background-color: #fcfcfc; }
-
-        .control-panel {
-            display: flex;
-            padding: 12px 20px;
-            padding-bottom: max(12px, env(safe-area-inset-bottom));
-            background-color: var(--bg-chat);
-            border-top: 1px solid var(--border-light);
-            gap: 12px;
-        }
-
-        .input-wrapper {
-            flex-grow: 1;
-            position: relative;
-        }
-
-        input[type="text"] {
-            width: 100%;
-            box-sizing: border-box;
-            padding: 14px 20px;
-            border: 1px solid #ced4da;
-            border-radius: 30px;
-            font-size: 1rem; /* ≥16px prevents iOS auto-zoom on focus */
-            font-family: inherit;
-            outline: none;
-            transition: border-color 0.2s, box-shadow 0.2s;
-        }
-
-        input[type="text"]:focus {
-            border-color: var(--secondary-blue);
-            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.15);
-        }
-
-        input[type="text"]:disabled {
-            background-color: #f8f9fa;
-            cursor: not-allowed;
-        }
-
-        .suggestions-dropdown {
-            display: none;
-            position: absolute;
-            bottom: calc(100% + 8px);
-            left: 0;
-            right: 0;
-            background: #fff;
-            border: 1px solid #ced4da;
-            border-radius: 14px;
-            box-shadow: 0 -6px 24px rgba(0,0,0,0.11);
-            z-index: 200;
-            overflow: hidden;
-        }
-
-        .suggestion-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 10px 18px;
-            cursor: pointer;
-            border-bottom: 1px solid var(--border-light);
-            transition: background 0.1s;
-        }
-
-        .suggestion-item:last-child { border-bottom: none; }
-
-        .suggestion-item:hover,
-        .suggestion-item.sug-active { background: #f0f5ff; }
-
-        .sug-ticker {
-            font-weight: 700;
-            font-size: 0.84rem;
-            color: var(--primary-blue);
-            min-width: 52px;
-            font-family: 'SFMono-Regular', Consolas, monospace;
-            letter-spacing: 0.04em;
-        }
-
-        .sug-name {
-            font-size: 0.83rem;
-            color: #666;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        button {
-            background-color: var(--secondary-blue);
-            color: white;
-            border: none;
-            padding: 0 28px;
-            border-radius: 30px;
-            font-size: 0.95rem;
-            font-weight: 600;
-            cursor: pointer;
-            touch-action: manipulation;
-            transition: background-color 0.2s, transform 0.1s;
-        }
-
-        button:hover:not(:disabled) { background-color: var(--primary-blue); }
-        button:active:not(:disabled) { transform: scale(0.98); }
-        button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; }
-        
-        .loading-text { color: #6c757d; font-style: italic; font-size: 0.95rem; }
-        .error-text { color: #dc3545; font-weight: 500; font-size: 0.95rem; }
-
-        .suggestion-chips {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            padding: 10px 20px 0;
-            background-color: var(--bg-chat);
-        }
-
-        .chip {
-            background-color: transparent;
-            color: var(--primary-blue);
-            border: 1px solid #ced4da;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 0.82rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: background-color 0.15s, border-color 0.15s, color 0.15s;
-            white-space: nowrap;
-        }
-
-        .chip:hover:not(:disabled) {
-            background-color: var(--secondary-blue);
-            border-color: var(--secondary-blue);
-            color: #fff;
-        }
-
-        .chip:disabled { opacity: 0.45; cursor: not-allowed; }
-
-        /* ── Bubble price strip (inside each agent response) ──── */
-        .bubble-strip {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 14px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid var(--border-light);
-            font-family: 'SFMono-Regular', Consolas, 'Courier New', monospace;
-            font-size: 0.8rem;
-        }
-        .bubble-strip-cell {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            background: #f0f5ff;
-            border: 1px solid #d0e0ff;
-            border-radius: 6px;
-            padding: 5px 11px;
-            transition: background 0.2s;
-        }
-        .bubble-strip-cell:hover { background: #e4edff; }
-        .bsc-ticker { font-weight: 700; font-size: 0.82rem; letter-spacing: 0.04em; }
-        .bsc-price  { font-weight: 600; font-size: 0.88rem; }
-        .bsc-change { font-size: 0.74rem; }
-        .bsc-change.up   { color: #28a745; }
-        .bsc-change.down { color: #dc3545; }
-        .bsc-change.flat { color: #888; }
-        .bsc-controls {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            margin-left: auto;
-            color: #6c757d;
-            font-size: 0.76rem;
-        }
-        .bsc-time { white-space: nowrap; color: #888; }
-        .bsc-select {
-            background: transparent;
-            border: 1px solid #ced4da;
-            border-radius: 4px;
-            padding: 2px 5px;
-            font-size: 0.74rem;
-            color: #495057;
-            cursor: pointer;
-        }
-        .bsc-btn {
-            background: transparent;
-            border: 1px solid #ced4da;
-            border-radius: 4px;
-            color: var(--primary-blue);
-            padding: 2px 8px;
-            font-size: 0.76rem;
-            cursor: pointer;
-            transition: background 0.15s;
-        }
-        .bsc-btn:hover { background: #e8f0fe; }
-
-        /* ── Agent message — web style, readable ────────────────────────────── */
-        .message.agent {
-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            font-size: 0.95rem;
-            font-weight: 500;
-            color: #0a0a0a;
-            line-height: 1.55;
-            background-color: #ffffff;
-            border: 1px solid #dee2e6;
-        }
-
-        .message.agent p {
-            margin: 1px 0;
-        }
-
-        .message.agent b {
-            font-weight: 700;
-            color: #000000;
-        }
-
-        .message.agent hr {
-            margin: 6px 0;
-            border: none;
-            border-top: 1px solid #dee2e6;
-        }
-
-        /* ── Mobile responsive ───────────────────────────────────────────────── */
-        @media (max-width: 768px) {
-            body { align-items: flex-start; }
-
-            .chat-container {
-                width: 100%;
-                max-width: 100%;
-                height: 100dvh;
-                border-radius: 0;
-                box-shadow: none;
-            }
-
-            header {
-                padding: 10px 14px;
-                font-size: 0.95rem;
-            }
-
-            .subtitle { font-size: 0.66rem; margin-top: 2px; }
-
-            #chat-window { padding: 10px 8px; gap: 10px; }
-
-            .message {
-                padding: 10px 12px;
-                font-size: 0.88rem;
-                border-radius: 8px;
-            }
-
-            .message.user { max-width: 90%; }
-
-            .message.agent {
-                font-size: 0.88rem;
-                line-height: 1.6;
-            }
-
-            .suggestion-chips { padding: 6px 8px 0; gap: 5px; }
-
-            .chip { font-size: 0.72rem; padding: 5px 10px; }
-
-            .control-panel {
-                padding: 8px 10px;
-                padding-bottom: max(8px, env(safe-area-inset-bottom));
-                gap: 8px;
-            }
-
-            input[type="text"] { padding: 11px 16px; }
-
-            button { padding: 0 16px; font-size: 0.88rem; min-width: 60px; }
-
-            table { font-size: 0.78rem; min-width: 540px; }
-
-            th, td { padding: 7px 9px; }
-
-            .bubble-strip { font-size: 0.73rem; gap: 6px; }
-            .bubble-strip-cell { padding: 4px 8px; }
-            .bsc-controls { width: 100%; margin-left: 0; margin-top: 4px; }
-        }
-    </style>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
 <div class="chat-container">
     <header>
-        AlphaQuant Assistant
-        <div class="subtitle">Abhishek - Trading AI Agent for Quantitative Analysis & Live Market Data</div>
+        <div class="header-content">
+            <div class="header-title">
+                Trading Agent
+                <div class="subtitle">Abhishek — AI-Powered Quantitative Analysis &amp; Live Market Intelligence</div>
+            </div>
+            <div class="header-controls">
+                <div class="header-conn" id="headerConn" onclick="openSettingsModal()" title="Model settings">
+                    <span class="conn-dot conn-dot-red" id="connDot"></span>
+                    <span class="header-model-label" id="headerModelLabel">connecting…</span>
+                </div>
+                <button class="settings-btn" onclick="openSettingsModal()" title="Model Settings">⚙</button>
+            </div>
+        </div>
     </header>
 
     <div id="chat-window">
         <div class="message agent">
-            Hello! I am Abhishek - Trading AI Agent, your quantitative trading assistant. Ask me for live stock prices, trend evaluations, or trading recommendations.
+            Hello! I am your AI-Powered Trading Agent. Ask me for live stock prices, multi-timeframe analysis, or a detailed trade plan for any US equity.
         </div>
     </div>
 
@@ -450,484 +40,88 @@
         <button class="chip" onclick="submitChip('what stocks are gapping up or down right now?')">⚡ Gap Plays</button>
         <button class="chip" onclick="submitChip('what are the most active stocks with high volume?')">🔥 Most Active</button>
     </div>
+
     <div class="control-panel">
         <div class="input-wrapper">
-            <input type="text" id="commandInput" placeholder="Ask AlphaQuant — e.g. 'analyze NVDA', 'pre-market movers', 'scan market'" oninput="handleInputChange(this.value)" onkeydown="handleInputKeydown(event)" onblur="setTimeout(hideSuggestions, 160)">
+            <input type="text" id="commandInput"
+                   placeholder="Ask Trading Agent — e.g. 'analyze NVDA', 'pre-market movers', 'scan market'"
+                   oninput="handleInputChange(this.value)"
+                   onkeydown="handleInputKeydown(event)"
+                   onblur="setTimeout(hideSuggestions, 160)">
             <div id="suggestions" class="suggestions-dropdown"></div>
         </div>
         <button id="sendButton" onclick="dispatchCommand()">Send</button>
     </div>
 </div>
 
-<script>
-    // ── State ─────────────────────────────────────────────────────────────────
-    let activeStrip           = null;
-    let lastAgentMsg          = null;
-    let refreshTimerId        = null;
-    let activeAbortController = null;
-    let stripGeneration       = 0;
+<!-- ── Settings Modal ──────────────────────────────────────────────────── -->
+<div id="settingsModal" class="modal-overlay" style="display:none"
+     onclick="if(event.target===this)closeSettingsModal()">
+    <div class="modal-box">
+        <div class="modal-header">
+            <span>⚙ Model Settings</span>
+            <div style="display:flex;gap:8px;align-items:center">
+                <button class="modal-edit-btn" id="sEditBtn" onclick="enterEditMode()" style="display:none">✏ Edit</button>
+                <button class="modal-close" onclick="closeSettingsModal()">✕</button>
+            </div>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label for="sProvider">Provider</label>
+                <select id="sProvider" class="modal-input modal-select" onchange="selectProvider(this.value)">
+                    <option value="ollama">🦙 Ollama (Local)</option>
+                    <option value="openai">🤖 OpenAI</option>
+                    <option value="anthropic">🧠 Anthropic</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="sModel">Model Name</label>
+                <input type="text" id="sModel" class="modal-input"
+                       placeholder="e.g. qwen3.6:35b, gpt-4o, claude-sonnet-4-6"
+                       oninput="onModelInput(this.value)">
+                <div id="modelSuggestions" class="model-suggestions"></div>
+                <span class="field-hint">Ollama: qwen3.6:35b · OpenAI: gpt-4o · Broadcom proxy: openai/gpt-oss-120b · Anthropic: claude-sonnet-4-6</span>
+            </div>
+            <div class="form-group">
+                <label for="sBaseUrl" id="sBaseUrlLabel">Endpoint URL</label>
+                <input type="text" id="sBaseUrl" class="modal-input" placeholder="http://127.0.0.1:11434">
+                <span class="field-hint" id="sBaseUrlHint">e.g. http://127.0.0.1:11434</span>
+            </div>
+            <div class="form-group" id="sApiKeyGroup" style="display:none">
+                <label for="sApiKey">API Key</label>
+                <input type="password" id="sApiKey" class="modal-input"
+                       placeholder="sk-… (leave blank to keep existing)">
+            </div>
+            <div class="form-group">
+                <label>Temperature: <span id="sTempDisplay">0.0</span></label>
+                <input type="range" id="sTemp" min="0" max="1" step="0.05" value="0.0" class="modal-range"
+                       oninput="document.getElementById('sTempDisplay').textContent=parseFloat(this.value).toFixed(2)">
+            </div>
+            <div class="form-group conn-row" id="sTestRow">
+                <button id="sTestBtn" class="modal-test-btn" onclick="testConnection()">🔌 Test Connection</button>
+                <span id="sConnStatus"><span class="conn-testing">—</span></span>
+            </div>
+            <div class="form-group" id="sConfigFileGroup">
+                <label>Upload Config File (JSON)</label>
+                <input type="file" id="sConfigFile" accept=".json,.properties,.txt"
+                       onchange="handleConfigUpload(event)" class="modal-file">
+            </div>
+            <div class="form-group options-row" id="sOptionsRow">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="sAutoConnect" checked> Auto-connect on startup
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="sRemember" checked> Remember for 30 days
+                </label>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="modal-cancel-btn" id="sCancelBtn" onclick="cancelEdit()" style="display:none">Cancel</button>
+            <button class="modal-apply-btn" id="sApplyBtn" onclick="applyModelConfig()">Save &amp; Apply</button>
+        </div>
+    </div>
+</div>
 
-    // ── marked: don't wrap block-level LLM HTML in <p> tags ──────────────────
-    (function () {
-        const renderer = new marked.Renderer();
-        renderer.paragraph = function (token) {
-            const text = (typeof token === 'object' && token !== null) ? (token.text || '') : String(token || '');
-            return text.trimStart().startsWith('<') ? text + '\n' : '<p>' + text + '</p>\n';
-        };
-        marked.use({ renderer, breaks: true, gfm: true, pedantic: false });
-    })();
-
-    // ── Ticker helpers ────────────────────────────────────────────────────────
-    const TICKER_STOP = new Set([
-        'A','I','AM','AN','AT','BE','BY','DO','ETF','FOR','GO','HI','IF',
-        'IN','IS','IT','ME','MY','NO','OF','OK','ON','OR','THE','TO','UP',
-        'VS','AND','ARE','BIG','BUY','CAN','CEO','CFO','GET','HOT','HOW',
-        'IPO','NEW','NOW','OTC','ATH','ATL','PRE','ALL','TOP','SELL','SCAN',
-        'SHOW','WHAT','WHEN','WITH','MOST','BEST','FROM','GIVE','FIND','LAST',
-        'LIVE','JUST','HIGH','LOW'
-    ]);
-
-    const COMPANY_MAP = {
-        'tesla':'TSLA','nvidia':'NVDA','apple':'AAPL','google':'GOOGL',
-        'alphabet':'GOOGL','microsoft':'MSFT','amazon':'AMZN','meta':'META',
-        'facebook':'META','netflix':'NFLX','amd':'AMD','intel':'INTC',
-        'broadcom':'AVGO','salesforce':'CRM','palantir':'PLTR',
-        'coinbase':'COIN','shopify':'SHOP','snowflake':'SNOW',
-        'uber':'UBER','lyft':'LYFT','airbnb':'ABNB','spotify':'SPOT'
-    };
-
-    // Extract every unique TICKER ($PRICE) pair from the AI's response text
-    // Common financial terms that look like tickers (uppercase + price in parens) but aren't
-    const TICKER_BLOCKLIST = new Set([
-        'VWAP','EMA','SMA','WMA','RSI','MACD','ATH','ATL','ETF','IPO','NAV',
-        'ADX','ADR','OTC','SEC','NYSE','NASDAQ','SPX','VIX','OI','IV','PE',
-        'EPS','TTM','YTD','QOQ','YOY','AUM','CAGR','FCF','DCF','ROE','ROI',
-        'EBIT','EBITDA','GAAP','ROIC','NII','NIM','BPS','PPS','ATM','ITM','OTM'
-    ]);
-
-    function extractAllTickers(text) {
-        const seen = new Set(), result = [];
-        const re = /\b([A-Z]{1,5})\s*\(\$[\d,]+\.?\d{0,2}\)/g;
-        let m;
-        while ((m = re.exec(text)) !== null) {
-            if (!seen.has(m[1]) && !TICKER_BLOCKLIST.has(m[1])) {
-                seen.add(m[1]);
-                result.push(m[1]);
-            }
-        }
-        return result;
-    }
-
-    // Fallback when response has no TICKER ($PRICE) pattern (e.g. conversational reply)
-    function detectTickerFromInput(text) {
-        const lower = text.toLowerCase();
-        for (const [name, ticker] of Object.entries(COMPANY_MAP)) {
-            if (lower.includes(name)) return ticker;
-        }
-        const upper = text.toUpperCase();
-        for (const m of upper.matchAll(/\b([A-Z]{2,5})\b/g)) {
-            if (!TICKER_STOP.has(m[1])) return m[1];
-        }
-        return null;
-    }
-
-    // ── LLM output helpers ────────────────────────────────────────────────────
-    const RAW_TAG_MAP = {
-        'EXECUTE_CALL_OR_LONG_SPREAD':       '🔥 Buy Now',
-        'PREPARE_LONG_BUY_DIP_AT_VWAP':      '⏳ Wait to Buy on a Dip',
-        'EXECUTE_PUT_OR_SHORT_SPREAD':        '⚠️ Sell / Short Now',
-        'PREPARE_SHORT_FADE_BOUNCE_AT_VWAP':  '⏳ Wait to Sell on a Bounce',
-        'STAND_DOWN_COLLECT_PREMIUM':         '— No Clear Trade',
-        'STRONG_BUY':  '🔥 Strong Buy',
-        'STRONG_SELL': '🔴 Strong Sell',
-    };
-    function sanitizeLlmOutput(html) {
-        let out = html;
-        for (const [raw, label] of Object.entries(RAW_TAG_MAP))
-            out = out.replaceAll(raw, label);
-        out = out.replace(/\{OPTIONAL_CUSTOM_DURATION\}/g, '');
-        out = applyColorCoding(out);
-        return out;
-    }
-
-    // Colour-code arrows and direction phrases in text nodes only (never inside tag attributes).
-    const GREEN = '#28a745', RED = '#dc3545', ORANGE = '#ffc107';
-
-    // Phrases the model should colour but sometimes misses
-    const PHRASE_COLORS = [
-        [/Trending UP ↑|Trend just flipped UP ↑|Going Up ↑|Rising ↑|Pushing Up ↑|Moving Up ↑/g, GREEN],
-        [/Trending DOWN ↓|Trend just flipped DOWN ↓|Going Down ↓|Falling ↓|Pushing Down ↓|Moving Down ↓/g, RED],
-        [/Buy \/ Long|Buy Now|Wait to Buy on a Dip/g, GREEN],
-        [/Sell \/ Short|Sell Now|Wait to Sell on a Bounce/g, RED],
-        [/Sideways →|Flat →|Sit Out for Now/g, ORANGE],
-    ];
-
-    function applyColorCoding(html) {
-        // Split into tag tokens and text tokens; only mutate text tokens.
-        return html.replace(/(<[^>]*>)|([^<]+)/g, (match, tag, text) => {
-            if (tag) return tag; // preserve HTML tags and their attributes untouched
-
-            // 1. Colour full directional phrases first (they include the arrow)
-            let out = PHRASE_COLORS.reduce((t, [re, color]) =>
-                t.replace(re, m => `<span style="color:${color}">${m}</span>`), text);
-
-            // 2. Colour any remaining bare arrows not already wrapped above
-            out = out
-                .replace(/↑/g, `<span style="color:${GREEN}">↑</span>`)
-                .replace(/↓/g, `<span style="color:${RED}">↓</span>`)
-                .replace(/→/g, `<span style="color:${ORANGE}">→</span>`);
-
-            return out;
-        });
-    }
-    function wrapTables(container) {
-        container.querySelectorAll('table').forEach(t => {
-            if (t.parentElement.classList.contains('table-scroll')) return;
-            const wrap = document.createElement('div');
-            wrap.className = 'table-scroll';
-            t.parentNode.insertBefore(wrap, t);
-            wrap.appendChild(t);
-        });
-    }
-
-    // ── Bubble strip ──────────────────────────────────────────────────────────
-    function activateBubbleStrip(agentMsg, tickers) {
-        if (!tickers.length) return;
-        const myGen = ++stripGeneration;
-
-        // 1. Wrap each inline TICKER ($PRICE) — symbol gets data-live-symbol, price gets
-        //    data-live-price so the refresh can color both identically (same change direction).
-        //    Do this BEFORE appending the strip so the innerHTML rebuild is safe.
-        tickers.forEach(ticker => {
-            const esc = ticker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const re  = new RegExp('(' + esc + '\\s*\\()\\$[\\d,]+\\.?\\d{0,2}(\\))', 'g');
-            const patched = agentMsg.innerHTML.replace(
-                re,
-                () =>
-                    `<span data-live-symbol data-ticker="${ticker}" style="font-weight:bold">${ticker}</span>` +
-                    ` (<span data-live-price data-ticker="${ticker}" style="font-weight:bold">$…</span>)`
-            );
-            if (patched !== agentMsg.innerHTML) agentMsg.innerHTML = patched;
-        });
-
-        // 2. Build the strip with one cell per ticker
-        const strip = document.createElement('div');
-        strip.className = 'bubble-strip';
-
-        tickers.forEach(ticker => {
-            const cell = document.createElement('div');
-            cell.className   = 'bubble-strip-cell';
-            cell.dataset.ticker = ticker;
-            cell.innerHTML =
-                `<span class="bsc-ticker">${ticker}</span>` +
-                `<span class="bsc-price">…</span>` +
-                `<span class="bsc-change flat"></span>`;
-            strip.appendChild(cell);
-        });
-
-        // Controls: time + interval selector + refresh button
-        const ctrl = document.createElement('div');
-        ctrl.className = 'bsc-controls';
-        ctrl.innerHTML =
-            `<span class="bsc-time"></span>` +
-            `<select class="bsc-select">` +
-                `<option value="0">Off</option>` +
-                `<option value="30">30s</option>` +
-                `<option value="60" selected>1m</option>` +
-                `<option value="120">2m</option>` +
-                `<option value="300">5m</option>` +
-            `</select>` +
-            `<button class="bsc-btn" title="Refresh now">⟳</button>`;
-        strip.appendChild(ctrl);
-        agentMsg.insertBefore(strip, agentMsg.firstChild);
-
-        // 3. Wire up controls with closures so they always refresh THIS strip
-        const doRefresh = () => { if (myGen !== stripGeneration) return; refreshAllCells(strip, agentMsg); };
-        ctrl.querySelector('.bsc-btn').onclick = doRefresh;
-        ctrl.querySelector('.bsc-select').onchange = function () {
-            if (refreshTimerId) clearInterval(refreshTimerId);
-            refreshTimerId = null;
-            const secs = parseInt(this.value, 10);
-            if (secs > 0) refreshTimerId = setInterval(doRefresh, secs * 1000);
-        };
-
-        // 4. Replace global active strip reference and start refreshing
-        if (refreshTimerId) clearInterval(refreshTimerId);
-        activeStrip  = strip;
-        lastAgentMsg = agentMsg;
-        doRefresh();                                              // immediate
-        refreshTimerId = setInterval(doRefresh, 60 * 1000);      // default 1m
-    }
-
-    async function refreshAllCells(strip, msgEl) {
-        if (!strip) return;
-        const cells = Array.from(strip.querySelectorAll('.bubble-strip-cell[data-ticker]'));
-        await Promise.all(cells.map(c => refreshCell(c, c.dataset.ticker, msgEl)));
-        const timeEl = strip.querySelector('.bsc-time');
-        if (timeEl) {
-            timeEl.textContent = new Date().toLocaleTimeString(
-                'en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'}
-            ) + ' ET';
-        }
-    }
-
-    async function refreshCell(cell, ticker, msgEl) {
-        try {
-            const res  = await fetch(`/api/price/${encodeURIComponent(ticker)}`);
-            if (!res.ok) return;
-            const data = await res.json();
-            if (data.price <= 0) return;
-
-            const sign  = data.change >= 0 ? '+' : '';
-            const cls   = data.change > 0.005 ? 'up' : (data.change < -0.005 ? 'down' : 'flat');
-            const arrow = cls === 'up' ? '▲' : (cls === 'down' ? '▼' : '—');
-            const color = cls === 'up' ? '#28a745' : (cls === 'down' ? '#dc3545' : '#0056b3');
-
-            // Update the strip cell
-            const tickerEl = cell.querySelector('.bsc-ticker');
-            const priceEl  = cell.querySelector('.bsc-price');
-            const changeEl = cell.querySelector('.bsc-change');
-            tickerEl.style.color = color;
-            priceEl.textContent  = '$' + data.price.toFixed(2);
-            priceEl.style.color  = color;
-            changeEl.textContent = `${arrow} ${sign}${data.changePercent.toFixed(2)}%`;
-            changeEl.className   = 'bsc-change ' + cls;
-
-            // Update the inline TICKER ($PRICE) spans inside the bubble text
-            if (msgEl) {
-                // Update the price span
-                const priceSpan = msgEl.querySelector(`[data-live-price][data-ticker="${ticker}"]`);
-                if (priceSpan) {
-                    priceSpan.textContent = '$' + data.price.toFixed(2);
-                    priceSpan.style.color = color;
-                }
-                // Update the symbol span (same color as price — both reflect today's direction)
-                const symbolSpan = msgEl.querySelector(`[data-live-symbol][data-ticker="${ticker}"]`);
-                if (symbolSpan) {
-                    symbolSpan.style.color = color;
-                }
-                // Walk up from the price span and recolor the first ancestor <span> the AI
-                // generated for the header (the outer style="color:..."> wrapper around the symbol)
-                if (priceSpan) {
-                    let outer = priceSpan.parentElement;
-                    while (outer && outer !== msgEl) {
-                        if (outer.tagName === 'SPAN' && outer.style.color) {
-                            outer.style.color = color;
-                            break;
-                        }
-                        outer = outer.parentElement;
-                    }
-                }
-            }
-        } catch (e) { /* silent: stale price stays visible */ }
-    }
-
-    // ── Autocomplete ──────────────────────────────────────────────────────────
-    let selectedSuggestionIdx = -1;
-    let suggestDebounceTimer  = null;
-
-    function getLastToken(text) {
-        const m = text.match(/(\S+)$/);
-        return m ? m[1] : '';
-    }
-
-    async function handleInputChange(value) {
-        const term = getLastToken(value);
-        if (term.length < 2) { hideSuggestions(); return; }
-        clearTimeout(suggestDebounceTimer);
-        suggestDebounceTimer = setTimeout(async () => {
-            try {
-                const res = await fetch(`/api/search?q=${encodeURIComponent(term)}`);
-                if (!res.ok) return;
-                const items = await res.json();
-                showSuggestions(items.map(i => [i.symbol, i.name]));
-            } catch (e) { /* autocomplete is optional — never block the user */ }
-        }, 280);
-    }
-
-    function showSuggestions(items) {
-        const box = document.getElementById('suggestions');
-        if (!items.length) { hideSuggestions(); return; }
-        selectedSuggestionIdx = -1;
-        box.innerHTML = items.map(([sym, name]) =>
-            `<div class="suggestion-item" data-sym="${sym}" onmousedown="event.preventDefault();pickSuggestion('${sym}')">` +
-            `<span class="sug-ticker">${sym}</span><span class="sug-name">${name}</span></div>`
-        ).join('');
-        box.style.display = 'block';
-    }
-
-    function hideSuggestions() {
-        const box = document.getElementById('suggestions');
-        if (box) { box.style.display = 'none'; box.innerHTML = ''; }
-        selectedSuggestionIdx = -1;
-    }
-
-    function pickSuggestion(symbol) {
-        const inputEl = document.getElementById('commandInput');
-        const val   = inputEl.value;
-        const token = getLastToken(val);
-        inputEl.value = token ? val.slice(0, val.length - token.length) + symbol : symbol;
-        hideSuggestions();
-        inputEl.focus();
-    }
-
-    function navigateSuggestions(dir) {
-        const box   = document.getElementById('suggestions');
-        const items = box.querySelectorAll('.suggestion-item');
-        if (!items.length) return;
-        if (selectedSuggestionIdx >= 0) items[selectedSuggestionIdx].classList.remove('sug-active');
-        selectedSuggestionIdx += dir;
-        if (selectedSuggestionIdx < -1)            selectedSuggestionIdx = items.length - 1;
-        if (selectedSuggestionIdx >= items.length) selectedSuggestionIdx = -1;
-        if (selectedSuggestionIdx >= 0) {
-            items[selectedSuggestionIdx].classList.add('sug-active');
-            items[selectedSuggestionIdx].scrollIntoView({ block: 'nearest' });
-        }
-    }
-
-    function handleInputKeydown(event) {
-        const box    = document.getElementById('suggestions');
-        const isOpen = box && box.style.display === 'block';
-        if (event.key === 'ArrowDown') { if (isOpen) { event.preventDefault(); navigateSuggestions(1);  } return; }
-        if (event.key === 'ArrowUp')   { if (isOpen) { event.preventDefault(); navigateSuggestions(-1); } return; }
-        if (event.key === 'Escape')    { hideSuggestions(); return; }
-        if (event.key === 'Enter') {
-            if (isOpen && selectedSuggestionIdx >= 0) {
-                event.preventDefault();
-                pickSuggestion(box.querySelectorAll('.suggestion-item')[selectedSuggestionIdx].dataset.sym);
-            } else {
-                dispatchCommand();
-            }
-        }
-    }
-
-    // ── Chip helpers ─────────────────────────────────────────────────────────
-    function submitChip(text) {
-        document.getElementById('commandInput').value = text;
-        hideSuggestions();
-        dispatchCommand();
-    }
-
-    function setChipsDisabled(disabled) {
-        document.querySelectorAll('.chip').forEach(c => c.disabled = disabled);
-    }
-
-    // ── Mobile keyboard resize fallback (iOS < 16 / older Android) ───────────
-    if (window.visualViewport) {
-        const container = document.querySelector('.chat-container');
-        window.visualViewport.addEventListener('resize', () => {
-            container.style.height = Math.floor(window.visualViewport.height * 0.94) + 'px';
-        });
-        window.visualViewport.addEventListener('scroll', () => {
-            container.style.height = Math.floor(window.visualViewport.height * 0.94) + 'px';
-        });
-    }
-
-    // ── Main chat dispatch ────────────────────────────────────────────────────
-    async function dispatchCommand() {
-        const inputEl  = document.getElementById('commandInput');
-        const sendBtn  = document.getElementById('sendButton');
-        const rawText  = inputEl.value.trim();
-        if (!rawText) return;
-
-        hideSuggestions();
-        if (activeAbortController) activeAbortController.abort();
-        activeAbortController = new AbortController();
-
-        inputEl.value    = '';
-        inputEl.disabled = true;
-        sendBtn.textContent = 'Cancel';
-        sendBtn.onclick  = () => activeAbortController && activeAbortController.abort();
-        setChipsDisabled(true);
-
-        const chatWindow = document.getElementById('chat-window');
-
-        const userMsg = document.createElement('div');
-        userMsg.className   = 'message user';
-        userMsg.textContent = rawText;
-        chatWindow.appendChild(userMsg);
-
-        const agentMsg = document.createElement('div');
-        agentMsg.className = 'message agent';
-        agentMsg.innerHTML = '<span class="loading-text">Fetching live market data...</span>';
-        chatWindow.appendChild(agentMsg);
-        chatWindow.scrollTop = chatWindow.scrollHeight;
-
-        function resetUI() {
-            inputEl.disabled    = false;
-            sendBtn.textContent = 'Send';
-            sendBtn.onclick     = dispatchCommand;
-            setChipsDisabled(false);
-            inputEl.focus();
-        }
-
-        try {
-            const response = await fetch('/api/chat/stream', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ input: rawText }),
-                signal: activeAbortController.signal
-            });
-            if (!response.ok) throw new Error('Server rejected the request.');
-
-            const reader  = response.body.getReader();
-            const decoder = new TextDecoder();
-            let finalOutputString = '';
-            let renderPending     = false;
-            let processActive     = true;
-            let streamComplete    = false;
-
-            const renderFrame = () => {
-                if (streamComplete) { renderPending = false; return; }
-                if (finalOutputString.trim()) {
-                    agentMsg.innerHTML = sanitizeLlmOutput(marked.parse(finalOutputString));
-                    wrapTables(agentMsg);
-                }
-                chatWindow.scrollTop = chatWindow.scrollHeight;
-                renderPending = false;
-            };
-
-            while (processActive) {
-                const { value, done } = await reader.read();
-                if (done) { processActive = false; break; }
-                const chunk = decoder.decode(value, { stream: true });
-                if (chunk.startsWith('__PROGRESS__:')) {
-                    agentMsg.innerHTML = `<span class="loading-text">${chunk.slice(13)}</span>`;
-                    chatWindow.scrollTop = chatWindow.scrollHeight;
-                    continue;
-                }
-                finalOutputString += chunk;
-                if (!renderPending) { renderPending = true; requestAnimationFrame(renderFrame); }
-            }
-
-            if (finalOutputString.trim()) {
-                agentMsg.innerHTML = sanitizeLlmOutput(marked.parse(finalOutputString));
-                wrapTables(agentMsg);
-            }
-            chatWindow.scrollTop = chatWindow.scrollHeight;
-            renderPending  = false;
-            streamComplete = true;
-
-            let tickers = extractAllTickers(finalOutputString);
-            if (!tickers.length) {
-                const t = detectTickerFromInput(rawText);
-                if (t) tickers = [t];
-            }
-            if (tickers.length) activateBubbleStrip(agentMsg, tickers);
-
-        } catch (error) {
-            if (error.name === 'AbortError') {
-                agentMsg.innerHTML = '<span class="loading-text">Request cancelled.</span>';
-            } else {
-                console.error(error);
-                agentMsg.innerHTML = '<span class="error-text">Could not reach the server. Is the backend running?</span>';
-            }
-            chatWindow.scrollTop = chatWindow.scrollHeight;
-        } finally {
-            activeAbortController = null;
-            resetUI();
-        }
-    }
-</script>
+<script src="app.js"></script>
 </body>
 </html>
