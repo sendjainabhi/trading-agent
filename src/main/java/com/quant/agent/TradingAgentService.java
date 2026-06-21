@@ -1,125 +1,764 @@
 package com.quant.agent;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.ai.anthropic.AnthropicChatModel;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.api.AnthropicApi;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
-import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.memory.InMemoryChatMemory;
+import org.springframework.ai.model.tool.ToolCallingManager;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
-import java.time.DayOfWeek;
+import java.io.File;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class TradingAgentService {
 
-    private final ChatClient chatClient;
-    private final ChatMemory chatMemory = new InMemoryChatMemory();
+    private static final Logger log = LoggerFactory.getLogger(TradingAgentService.class);
+
+    // ── Intent detection constants ────────────────────────────────────────────
+
+    private static final Pattern TICKER_PATTERN =
+            Pattern.compile("(?<![A-Za-z])\\$?([A-Z]{1,5})(?![A-Za-z])");
+
+    // Common uppercase words that are NOT tickers — keep in sync with JS TICKER_STOP
+    private static final Set<String> TICKER_STOP_WORDS = Set.of(
+            "A", "I", "AM", "AN", "AT", "BE", "BY", "DO", "GO", "HI", "IF", "IN", "IS", "IT",
+            "ME", "MY", "NO", "OF", "OK", "ON", "OR", "SO", "TO", "UP", "US", "WE", "AI", "VS",
+            "AS", "TV", "PM", "IM", "ETF", "CEO", "CFO", "CTO", "IPO", "OTC", "SEC", "FED",
+            "GDP", "IRS", "ISM", "EMA", "RSI", "ATR", "SMA", "VWAP", "ATH", "ATL",
+            "AND", "ARE", "BUT", "CAN", "FOR", "GET", "HAS", "HOW", "NOW", "THE",
+            "ALL", "BUY", "TOP", "RUN", "ASK", "BIG", "HIT", "SET", "USE", "ANY",
+            // scanner / directive words that appear uppercase but are not tickers
+            "SCAN", "SHOW", "SELL", "FIND", "GIVE", "LAST", "LIVE", "JUST",
+            "WHAT", "WHEN", "WITH", "MOST", "BEST", "FROM", "HIGH", "LOW",
+            "HOT", "NEW", "PRE", "POST", "MORE", "LESS", "ALSO", "OPEN",
+            "YTD", "MTD", "QTD"
+    );
+
+    // Well-known company names → ticker (handles natural language like "analyze Tesla")
+    private static final Map<String, String> COMPANY_TO_TICKER = Map.ofEntries(
+            Map.entry("tesla",     "TSLA"),
+            Map.entry("nvidia",    "NVDA"),
+            Map.entry("apple",     "AAPL"),
+            Map.entry("microsoft", "MSFT"),
+            Map.entry("amazon",    "AMZN"),
+            Map.entry("google",    "GOOGL"),
+            Map.entry("alphabet",  "GOOGL"),
+            Map.entry("meta",      "META"),
+            Map.entry("netflix",   "NFLX"),
+            Map.entry("palantir",  "PLTR"),
+            Map.entry("coinbase",  "COIN"),
+            Map.entry("amd",       "AMD"),
+            Map.entry("intel",     "INTC"),
+            Map.entry("broadcom",  "AVGO"),
+            Map.entry("uber",      "UBER"),
+            Map.entry("disney",    "DIS"),
+            Map.entry("jpmorgan",  "JPM"),
+            Map.entry("goldman",   "GS"),
+            Map.entry("microstrategy", "MSTR"),
+            Map.entry("rivian",    "RIVN")
+    );
+
+    // ── Provider management ───────────────────────────────────────────────────
+
+    @Autowired
+    private ToolCallingManager toolCallingManager;
+
+    private final ChatClient.Builder ollamaClientBuilder;
+    private final Map<String, ChatClient> providerClients = new ConcurrentHashMap<>();
+    private volatile ChatClient activeChatClient;
+    private volatile String activeProvider    = "ollama";
+    private volatile String activeModel;
+    private volatile float  activeTemperature = 0.0f;
+    private volatile String activeApiKey      = "";
+    private volatile String activeBaseUrl     = "";
+
+    // Persisted to the workspace parent directory (one level above trading-agent/)
+    private static final String SAVED_CONFIG_PATH =
+            java.nio.file.Paths.get(System.getProperty("user.dir", "."))
+                    .getParent().resolve("agent-config.json").toString();
+
+    @Value("${spring.ai.ollama.base-url:http://127.0.0.1:11434}")
+    private String ollamaBaseUrl;
+
+    @Value("${spring.ai.ollama.chat.options.model:qwen3:30b}")
+    private String defaultOllamaModel;
+
+    @Value("${spring.ai.openai.api-key:}")
+    private String openAiKey;
+
+    @Value("${spring.ai.openai.base-url:https://api.openai.com}")
+    private String defaultOpenAiBaseUrl;
+
+    @Value("${spring.ai.openai.chat.options.model:gpt-4o}")
+    private String defaultOpenAiModel;
+
+    private volatile String runtimeOpenAiBaseUrl;
+    private volatile String runtimeOpenAiKey;
+
+    @Value("${spring.ai.anthropic.api-key:}")
+    private String anthropicKey;
+
+    @Value("${spring.ai.anthropic.base-url:https://api.anthropic.com}")
+    private String defaultAnthropicBaseUrl;
+
+    private volatile String runtimeAnthropicBaseUrl;
+    private volatile String runtimeAnthropicKey;
+
+    @Value("${spring.ai.anthropic.chat.options.model:claude-sonnet-4-6}")
+    private String defaultAnthropicModel;
+
+    private final HttpClient statusHttpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
+    private final ObjectMapper statusMapper = new ObjectMapper();
+
+    // ── Base rules sent on every request (~4 KB) ──────────────────────────────
+    private static final String BASE_RULES = """
+                    You are 'AlphaQuant', a friendly trading assistant. Explain everything like you are a knowledgeable friend helping someone understand the markets — no jargon, no acronyms unless you immediately explain them in plain words right after.
+
+                    MANDATORY TOOL CALLING RULE:
+                    You MUST call 'stockPriceFunction' for specific ticker inquiries — it returns all technical data including trend, RSI, EMA crossover, and trade setup in one call. You MUST call 'generalMarketScannerFunction' for broad scans, top options, or trending lists. You MUST call 'preMarketScannerFunction' for pre-market queries. Never invent data. Never call a second function for more data on the same ticker.
+
+                    PLAIN LANGUAGE TRANSLATION RULES — apply these everywhere, every time:
+                    A. INDICATOR TRANSLATION:
+                       - ema_crossover_status "Bullish Cross" → "Trend just flipped UP ↑"
+                       - ema_crossover_status "Bearish Cross" → "Trend just flipped DOWN ↓"
+                       - ema_crossover_status "Bullish"       → "Trending UP ↑"
+                       - ema_crossover_status "Bearish"       → "Trending DOWN ↓"
+                       - RSI below 30   → "[value] — Stock looks oversold (possible bounce)"
+                       - RSI 30–50      → "[value] — Momentum is weak, losing steam"
+                       - RSI 50–70      → "[value] — Momentum is healthy"
+                       - RSI above 70   → "[value] — Stock looks overbought (may pull back)"
+                    B. SIGNAL STRENGTH (total_confluence_score, range -100 to +100):
+                       - above +60  → "Very Strong Buy Signal ([score])"
+                       - +15 to +60 → "Moderate Buy Signal ([score])"
+                       - -15 to +15 → "No Clear Direction ([score])"
+                       - -60 to -15 → "Moderate Sell Signal ([score])"
+                       - below -60  → "Very Strong Sell Signal ([score])"
+                    C. VERDICT TRANSLATION (automated_trade_verdict — use strategy_name field instead, NEVER show raw tag):
+                       - EXECUTE_CALL_OR_LONG_SPREAD / PREPARE_LONG_BUY_DIP_AT_VWAP → entry timing is "execute now" or "wait for a dip"
+                       - EXECUTE_PUT_OR_SHORT_SPREAD / PREPARE_SHORT_FADE_BOUNCE_AT_VWAP → entry timing is "execute now" or "wait for a bounce"
+                       - STAND_DOWN_COLLECT_PREMIUM → no clear direction, collect range premium
+                    D. BUY STRENGTH TRANSLATION (buy_strength — NEVER show the raw tag):
+                       - STRONG_BUY  → "🔥 Strong Buy"
+                       - BUY         → "✅ Buy"
+                       - WATCH       → "⏳ Watch & Wait"
+                       - SELL        → "⚠️ Sell Signal"
+                       - STRONG_SELL → "🔴 Strong Sell"
+                    E. SMART MONEY TRANSLATION (smart_money_verdict — NEVER show the raw tag):
+                       - ACCUMULATING → "🐋 Institutions Buying"
+                       - DISTRIBUTING → "🚨 Institutions Selling"
+                       - NEUTRAL      → "😐 Institutions Neutral"
+                    F. SESSION TAGS: 'PRE_MARKET' → 'Pre-Market', 'STANDARD_SESSION' → 'Open Market', 'POST_MARKET' → 'After-Hours'.
+                    G. NEVER use asterisks (**) for bolding. Use only <b> HTML tags.
+                    H. DYNAMIC DURATION: If the user asks for a specific timeframe (e.g., 'in 4 weeks', 'for 3 months'), pass the equivalent trading days into `customTradingDays` (1 week = 5, 4 weeks = 20, 1 month = 21, 3 months = 63, 6 months = 126). Omit custom range if no timeframe was requested.
+                    I. INTENT TAGS: When the message contains an [Intent: ...] tag, call the specified function immediately.
+                    J. ZERO HALLUCINATION: Every number must come verbatim from the live function payload.
+                    K. SMART MONEY NOTE: smart_money_score, smart_money_verdict, insider_mspr, analyst_buy/hold/sell, and smart_money_conflict are included in the stockPriceFunction payload — already blended into total_confluence_score.
+                    """;
+
+    // ── Single-stock template — injected only for ticker queries (~5 KB) ─────
+    private static final String STOCK_TEMPLATE = """
+                    ── SINGLE-STOCK ANALYSIS TEMPLATE ───────────────────────────────────────────
+                    (Use ONLY for a specific ticker. Never for scans.)
+
+                    COLOR RULES — substitute the EXACT hex code at every <span>:
+                    - Price header:  #28a745 if percent_change starts with "+", else #dc3545
+                    - Trend/Verdict/Trade: #28a745 if total_confluence_score > 15 | #dc3545 if < -15 | #ffc107 if between
+                    - Per-timeframe (Daily/1h/15m/5m): #28a745 bullish | #dc3545 bearish | #ffc107 flat
+                    - Change %: #28a745 if starts with "+" else #dc3545
+                    BOLD RULE: <b> on (1) ticker, (2) section headers, (3) verdict text, (4) trade price labels only.
+
+                    <b style="color:[price color]">[SYMBOL] ($[current_price])</b>  |  [Short plain-English setup label]
+                    Checked: [time h:mm AM/PM z]  |  Trend: <span style="color:[#28a745 if ema_crossover_status Bullish/Bullish Cross, #dc3545 if Bearish/Bearish Cross, #ffc107 if Neutral]">[translate ema_crossover_status Rule A]</span>  |  Momentum: [calculated_rsi_14d] — [RSI label Rule A]  |  Signal: [buy_score]↑ [sell_score]↓
+                    What to do: <b style="color:[verdict color]">[Rule C]</b> — [One sentence explaining why]
+                    <b>[LIVE SNAPSHOT]</b>  |  [session_status]  |  [Rule B]  |  VWAP: $[intraday_vwap]  |  Vol: [volume]
+                    Range: $[micro_support]–$[micro_resistance]  |  Change: <span style="color:[change color]">[percent_change]</span>  |  What to watch: [One action sentence]
+                    <b>[PRICE TARGETS]</b> (based on [implied_volatility] expected move)
+                    Tomorrow: $[tomorrow_lower]–$[tomorrow_upper]  |  Next week: $[next_week_lower]–$[next_week_upper][if custom requested:  |  [Window]: $[custom_lower]–$[custom_upper]]
+                    <b>[TREND]</b>
+                    Daily: <span style="color:[daily color]">[Up ↑/Down ↓/Sideways →]</span>  |  1h: <span style="color:[1h color]">[Rising ↑/Falling ↓/Flat →]</span>  |  15m: <span style="color:[15m color]">[Pushing Up ↑/Pushing Down ↓/Flat →]</span>  |  5m: <span style="color:[5m color]">[Moving Up ↑/Moving Down ↓/Flat →]</span>
+                    <b>[BUY OR SELL?]</b>  |  [Rule D]  |  ↑ Buy: [buy_score]/6  |  ↓ Sell: [sell_score]/6
+                    ↑ Buy case ([buy_score]/6): [active_buy_signals]
+                    ↓ Sell case ([sell_score]/6): [active_sell_signals]
+                    <b>[SMART MONEY]</b>  |  [Rule E]  |  Insider MSPR: [insider_mspr 2dp]  |  Analysts: [analyst_buy] Buy · [analyst_hold] Hold · [analyst_sell] Sell
+                    [if smart_money_conflict true:] ⚠️ Smart money and chart signals conflict — wait for alignment before committing full position.
+                    [if false + ACCUMULATING:] ✅ Institutions and technicals agree — buy signal confirmed by big money.
+                    [if false + DISTRIBUTING:] ✅ Institutions and technicals agree — sell signal confirmed by big money.
+                    [if false + NEUTRAL:] Smart money is on the sidelines — rely on technicals.
+                    <b>[TRADE SETUP]</b>
+                    <b style="color:[#28a745 if score>+15, #dc3545 if score<-15, #ffc107]">[strategy_name]</b> — [1-2 plain-English sentences on entry timing; mention smart money if relevant]
+                    [Output ONLY the matching price line — never print the condition label:]
+                    [If total_confluence_score > +15:] <b>Enter at:</b> $[final_entry]  |  <b>Take profit at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_entry−final_sl, 2dp] → Gain $[final_tp−final_entry, 2dp]
+                    [If total_confluence_score < −15:] <b>Enter/Sell at:</b> $[final_entry]  |  <b>Cover at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_sl−final_entry, 2dp] → Gain $[final_entry−final_tp, 2dp]
+                    [If between −15 and +15:] Watch: Break above $[micro_resistance] → buy  |  Drop below $[micro_support] → sell  |  Stop if holding: $[final_sl]
+                    <b>Options</b> ([strategy_name]): [options_line]
+                    """;
+
+    // ── Market scanner table — injected only for scan queries (~3 KB) ────────
+    private static final String SCANNER_TEMPLATE = """
+                    ── MARKET SCANNER TABLE ──────────────────────────────────────────────────────
+                    (Use ONLY when payload contains scan_results. Show all rows immediately.)
+
+                    <b>[TODAY'S TOP TRADES — [ticker_count] Stocks Worth Watching]</b>
+                    Scanned at: [processing time from System Note]
+                    <table>
+                    <tr><th>Stock</th><th>Price</th><th>Change</th><th>Market Hours</th><th>Direction</th><th>Signal</th><th>Enter At</th><th>Target</th><th>Exit If</th><th>Call Strike</th><th>Cover At</th><th>Expires</th></tr>
+                    [One <tr> per scan_results object:
+                    - Stock: <td><span style="color:[#28a745/>0 else #dc3545]"><b>[symbol]</b></span></td>
+                    - Price: <td>$[current_price]</td>
+                    - Change: <td><span style="color:[#28a745/+ else #dc3545]">[percent_change]</span></td>
+                    - Market Hours: <td>[session_status plain English]</td>
+                    - Direction: <td><span style="color:[#28a745/>15, #dc3545/<-15, #ffc107]">[Buy/>15 / Sell/<-15 / Wait]</span></td>
+                    - Signal: <td>[Rule B short form e.g. "Strong Buy (+72)"]</td>
+                    - Enter At: <td>$[final_entry]</td>
+                    - Target: <td>$[final_tp]</td>
+                    - Exit If: <td>$[final_sl]</td>
+                    - Call Strike: <td>$[strike_buy]</td>
+                    - Cover At: <td>$[strike_sell]</td>
+                    - Expires: <td>[target_expiration]</td>]
+                    </table>
+                    [1-2 plain English sentences on overall market mood. No jargon.]
+                    ---
+                    """;
+
+    // ── Pre-market table — injected only for pre-market queries (~4 KB) ──────
+    private static final String PRE_MARKET_TEMPLATE = """
+                    ── PRE-MARKET TABLE ─────────────────────────────────────────────────────────
+                    (Use ONLY when payload contains pre_market_scan_results. Show all rows immediately.)
+
+                    <b>[PRE-MARKET MOVERS — Stocks Moving Before the Open (4:00–9:30 AM ET)]</b>
+                    Scanned at: [processing time from System Note]
+                    <table>
+                    <tr><th>Stock</th><th>Pre-Mkt Price</th><th>Early Move</th><th>Early Volume</th><th>What It's Doing</th><th>Direction</th><th>Signal</th><th>Enter At</th><th>Target</th><th>Exit If</th><th>Call Strike</th><th>Cover At</th><th>Expires</th></tr>
+                    [One <tr> per pre_market_scan_results object:
+                    - Stock: <td><span style="color:[#28a745/>15, #dc3545/<-15, #ffc107]"><b>[symbol]</b></span></td>
+                    - Pre-Mkt Price: <td>$[current_price]</td>
+                    - Early Move: <td><span style="color:[#28a745/+ else #dc3545]">[percent_change]</span></td>
+                    - Early Volume: <td>[pre_market_volume]</td>
+                    - What It's Doing: <td><i>[pattern plain English: "Gap & Go (Bullish)"→"Opened higher and keeps climbing", "Gap & Go (Bearish)"→"Opened lower and keeps falling", "Gap & Fade (Selling Pressure)"→"Opened higher but sellers pushing back down", "Gap & Fade (Buying Interest)"→"Opened lower but buyers stepping in", "Consolidating at Gap"→"Holding gap level", "Gap Up (Mixed)"→"Opened higher, direction unclear", "Gap Down (Mixed)"→"Opened lower, direction unclear", "Flat Drift"→"Barely moved overnight"]</i></td>
+                    - Direction: <td><span style="color:[#28a745/>15, #dc3545/<-15, #ffc107]">[Buy/Sell/Wait]</span></td>
+                    - Signal: <td>[Rule B short form]</td>
+                    - Enter At: <td>$[final_entry]</td>
+                    - Target: <td>$[final_tp]</td>
+                    - Exit If: <td>$[final_sl]</td>
+                    - Call Strike: <td>$[strike_buy]</td>
+                    - Cover At: <td>$[strike_sell]</td>
+                    - Expires: <td>[target_expiration]</td>]
+                    </table>
+                    [2-3 plain English sentences: overall pre-market mood, strongest setup, best stock for the open. No jargon.]
+                    ---
+                    """;
 
     public TradingAgentService(ChatClient.Builder chatClientBuilder) {
-        LocalDate today = LocalDate.now();
-        LocalDate upcomingFriday = today.with(TemporalAdjusters.nextOrSame(DayOfWeek.FRIDAY));
-        if (today.getDayOfWeek() == DayOfWeek.FRIDAY || today.getDayOfWeek() == DayOfWeek.SATURDAY || today.getDayOfWeek() == DayOfWeek.SUNDAY) {
-            upcomingFriday = today.with(TemporalAdjusters.next(DayOfWeek.FRIDAY));
+        this.ollamaClientBuilder = chatClientBuilder
+                .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
+                .defaultAdvisors(new SimpleLoggerAdvisor());
+    }
+
+    @PostConstruct
+    public void initProviders() {
+        this.activeModel = defaultOllamaModel;
+        ChatClient ollamaClient = ollamaClientBuilder.build();
+        providerClients.put("ollama", ollamaClient);
+        activeChatClient = ollamaClient;
+        tryInitOpenAi(openAiKey, defaultOpenAiModel, defaultOpenAiBaseUrl);
+        tryInitAnthropic(anthropicKey, defaultAnthropicModel, defaultAnthropicBaseUrl);
+        loadSavedConfig();
+    }
+
+    private void loadSavedConfig() {
+        File f = new File(SAVED_CONFIG_PATH);
+        if (!f.exists()) return;
+        try {
+            Map<String, String> config = statusMapper.readValue(f, new TypeReference<Map<String, String>>() {});
+            if (!config.isEmpty()) {
+                updateModelConfig(config);
+                log.info("Restored model config from {}", SAVED_CONFIG_PATH);
+            }
+        } catch (Exception e) {
+            log.warn("Could not load saved config from {}: {}", SAVED_CONFIG_PATH, e.getMessage());
+        }
+    }
+
+    private void saveCurrentConfig() {
+        try {
+            Map<String, String> config = new HashMap<>();
+            config.put("provider",    activeProvider);
+            config.put("model",       activeModel);
+            config.put("apiKey",      activeApiKey);
+            config.put("baseUrl",     activeBaseUrl);
+            config.put("temperature", String.valueOf(activeTemperature));
+            statusMapper.writerWithDefaultPrettyPrinter().writeValue(new File(SAVED_CONFIG_PATH), config);
+            log.info("Saved model config — provider: {}, model: {}", activeProvider, activeModel);
+        } catch (Exception e) {
+            log.warn("Could not save config to {}: {}", SAVED_CONFIG_PATH, e.getMessage());
+        }
+    }
+
+    public Map<String, Object> testProviderConfig(Map<String, String> config) {
+        String provider = config.getOrDefault("provider", "").toLowerCase();
+        String apiKey   = config.getOrDefault("apiKey",   "");
+        String baseUrl  = config.getOrDefault("baseUrl",  "");
+
+        if ("ollama".equals(provider)) {
+            String url = isValidUrl(baseUrl) ? baseUrl : ollamaBaseUrl;
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(url + "/api/tags"))
+                        .timeout(Duration.ofSeconds(5))
+                        .GET().build();
+                int status = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString()).statusCode();
+                return status == 200
+                        ? Map.of("connected", true)
+                        : Map.of("connected", false, "error", "Ollama returned HTTP " + status);
+            } catch (Exception e) {
+                return Map.of("connected", false, "error", "Cannot reach Ollama at " + url + ": " + e.getMessage());
+            }
         }
 
-        String liveCalendarAnchor = today.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
-        String calculatedExpiration = upcomingFriday.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
+        if ("openai".equals(provider) || "anthropic".equals(provider)) {
+            // Fall back to stored runtime key when form left the key field blank (e.g. after file upload)
+            String resolvedKey = isValidKey(apiKey) ? apiKey
+                    : ("openai".equals(provider) ? runtimeOpenAiKey : runtimeAnthropicKey);
+            String resolvedUrl = isValidUrl(baseUrl) ? baseUrl
+                    : ("openai".equals(provider) ? runtimeOpenAiBaseUrl : runtimeAnthropicBaseUrl);
+            if (!isValidKey(resolvedKey)) return Map.of("connected", false, "error", "API key is required");
+            if (!isValidUrl(resolvedUrl)) return Map.of("connected", false, "error", "Base URL is required");
+            String model = config.getOrDefault("model", "");
+            if (model.isBlank()) return Map.of("connected", false, "error", "Model name is required");
 
-        this.chatClient = chatClientBuilder
-                .defaultSystem("""
-                    You are 'AlphaQuant', a trading assistant providing clear, plain-English market analysis using a strict 1:2 Risk-to-Reward ratio setup.
-                    
-                    CRITICAL GROUNDING RULES:
-                    1. Use 'stockPriceFunction' and 'historicalTrendFunction' for any individual ticker mentioned.
-                    2. Use 'generalMarketScannerFunction' ONLY for multi-stock scans or broad market requests.
-                    3. Extract the exact 'symbol' and 'company_name' directly from the tool payload and copy them VERBATIM into the output header.
-                    4. ZERO-HALLUCINATION MANDATE: You are strictly FORBIDDEN from using your internal LLM training data to guess, estimate, or fill in stock prices, volumes, or trends. EVERY single number you output MUST come directly from the JSON tool payloads.
-                    5. If a tool returns an "error" (meaning the live API and the backup cache both failed), you MUST abort the analysis and output: "The live market data feed is temporarily unavailable. Please try again later." DO NOT output the template.
-                    
-                    PLAIN ENGLISH TRANSLATION & BOLDING MANDATE:
-                    - Translate uppercase database statuses into clear, simple sentences.
-                    - Bold ONLY the first item descriptive phrase label of each line (e.g., '**Execution Verdict**:').
-                    - Bold ONLY the critical data value points, stock tickers, strategies, or direct direction phrases inside the text to highlight them. Leave normal prose unbolded.
-                    
-                    STRATEGY CONSTRAINTS, STRICT 1:2 MATH, & COLOR RULES:
-                    - BULLISH (GOLDEN_CROSS_BULLISH): 
-                      * Header HTML: ### <span style="color: #28a745;">[Verbatim Symbol] ($[current_price])</span> - [Verbatim Company Name] | Market Analysis
-                      * Verdict Indicator: 🟢 **BUY** — Upward trend detected. 
-                      * Plays: Strategy = **Bull Call Spread**. Naked = **Buy Call**.
-                      * STRICT 1:2 MATH: Stop-Loss = calculated_support. Take-Profit = current_price + (2 * (current_price - calculated_support)).
-                    - BEARISH (DEATH_CROSS_BEARISH): 
-                      * Header HTML: ### <span style="color: #dc3545;">[Verbatim Symbol] ($[current_price])</span> - [Verbatim Company Name] | Market Analysis
-                      * Verdict Indicator: 🔴 **SELL** — Downward trend detected. 
-                      * Plays: Strategy = **Bear Put Spread**. Naked = **Buy Put**.
-                      * STRICT 1:2 MATH: Stop-Loss = calculated_resistance. Take-Profit = current_price - (2 * (calculated_resistance - current_price)).
-                    - SIDEWAYS (Mixed/Flat indicators): 
-                      * Header HTML: ### <span style="color: #ffc107;">[Verbatim Symbol] ($[current_price])</span> - [Verbatim Company Name] | Market Analysis
-                      * Verdict Indicator: 🟠 **HOLD** — Moving sideways in a tight range. 
-                      * Plays: Strategy = **Iron Condor**. Naked = **No Play**. 
-                      * STRICT 1:2 MATH: Stop-Loss = calculated_support. Take-Profit = calculated_resistance.
-                    
-                    CONTEXT TIME:
-                    Current Date: {LIVE_ANCHOR} | Expiration Date: {EXPIRATION_DATE}
-                  
-                    OUTPUT TEMPLATE (STRICTLY FOLLOW THIS LINE STRUCTURE AND LABEL/KEYWORD BOLDING CONSTRAINTS):
-                    [Insert Header HTML Exactly based on the color rules above]
-                    **Execution Verdict**: [Verdict Indicator] (EMA Status: [Moving Average State] | RSI: **[Value]**)
-                    **Trend Assessment**: The stock is currently in a **[Bullish/Bearish/Sideways]** phase based on core market indicators.
-                    **Action Command**: Consider entering the trade at the current price of **$[current_price]**.
-                    **Price & Volume**: Last price: **$[current_price]** (**[percent_change]**) | Traded Volume: **[volume]** | Major Support: **$[calculated_support]** | Major Resistance: **$[calculated_resistance]**
-                    **Trend Summary & Goal**: Trend: **[Direction]** | Profit Target: **$[Take-Profit]** | Quick Summary: [Provide a brief sentence highlighting key things like **support levels** or **breakouts**].
-                    **🕒 1-Hour Chart Trend**: [If Bullish: Explain price is holding above averages. If Bearish: Explain price is slipping below resistance. If Sideways: Explain price is trading flat.]
-                    **⏱️ 15-Minute Chart Trend**: [If Bullish: Explain buying volume is stepping up. If Bearish: Explain sellers are liquidating. If Sideways: Explain volume is balanced.]
-                    **⚡ 5-Minute Chart Trend**: [If Bullish: Explain green candles are dominating. If Bearish: Explain red candles are dominating. If Sideways: Explain alternating candles.]
-                    **Options Strategy (Defined Risk)**: **[Strategy Name]** -> Buy the **$[Buy Strike] [Put/Call]** and Sell the **$[Sell Strike] [Put/Call]** (Expiring on **{EXPIRATION_DATE}**)
-                    **Alternative Strategy**: [Naked strategy description bolding terms like **Buy Call** or **No current play**] (Expiring on **{EXPIRATION_DATE}**)
-                    **RISK GATES**: Entry: **$[current_price]** | Take-Profit: **$[Validated Take-Profit]** | Stop-Loss: **$[Validated Stop-Loss]**
-                    ---
-                    """
-                    .replace("{LIVE_ANCHOR}", liveCalendarAnchor)
-                    .replace("{EXPIRATION_DATE}", calculatedExpiration))
-                .defaultFunctions("stockPriceFunction", "historicalTrendFunction", "generalMarketScannerFunction")
-                .defaultAdvisors(
-                        new MessageChatMemoryAdvisor(chatMemory),
-                        new SimpleLoggerAdvisor()
-                )
+            // Send a minimal chat completion to verify BOTH connectivity and model availability.
+            // GET /v1/models is unreliable on enterprise proxies — they often return 404/405 even
+            // when the chat endpoint works fine, so this POST gives a definitive answer.
+            try {
+                String chatUrl = resolvedUrl.endsWith("/")
+                        ? resolvedUrl + "v1/chat/completions"
+                        : resolvedUrl + "/v1/chat/completions";
+                String safeModel = model.replace("\\", "\\\\").replace("\"", "\\\"");
+                String body = "{\"model\":\"" + safeModel + "\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}";
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(chatUrl))
+                        .header("Authorization", "Bearer " + resolvedKey)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .timeout(Duration.ofSeconds(20))
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build();
+                HttpResponse<String> resp = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                int status = resp.statusCode();
+                if (status == 200 || status == 201) return Map.of("connected", true);
+                if (status == 401) return Map.of("connected", false, "error", "Invalid API key (401 Unauthorized)");
+                if (status == 403) return Map.of("connected", false, "error", "Access forbidden (403)");
+                if (status == 429) return Map.of("connected", false, "error", "Rate limit exceeded — try again later");
+                if (status == 404) {
+                    String respBody = resp.body() != null ? resp.body() : "";
+                    if (respBody.contains("model_not_found")) {
+                        return Map.of("connected", false, "error",
+                                "Model '" + model + "' not found — verify the model name with your provider");
+                    }
+                    return Map.of("connected", false, "error",
+                            "Endpoint not found (404) — verify the base URL");
+                }
+                return Map.of("connected", false, "error", "Server returned HTTP " + status);
+            } catch (Exception e) {
+                return Map.of("connected", false, "error", "Connection error: " + e.getMessage());
+            }
+        }
+
+        return Map.of("connected", false, "error", "Unknown provider: " + provider);
+    }
+
+    public Map<String, Object> testProviderConnection() {
+        if ("ollama".equals(activeProvider)) {
+            boolean ok = checkOllamaReachable();
+            return ok ? Map.of("connected", true)
+                      : Map.of("connected", false, "error", "Cannot reach Ollama at " + ollamaBaseUrl);
+        }
+        if (!providerClients.containsKey(activeProvider)) {
+            return Map.of("connected", false, "error",
+                    "No API key configured — upload a config file or enter the key in settings");
+        }
+        String baseUrl = "openai".equals(activeProvider) ? runtimeOpenAiBaseUrl : runtimeAnthropicBaseUrl;
+        String key     = "openai".equals(activeProvider) ? runtimeOpenAiKey     : runtimeAnthropicKey;
+        if (baseUrl == null || key == null) {
+            return Map.of("connected", false, "error", "Provider not fully configured");
+        }
+        try {
+            String testUrl = baseUrl.endsWith("/") ? baseUrl + "v1/models" : baseUrl + "/v1/models";
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(testUrl))
+                    .header("Authorization", "Bearer " + key)
+                    .header("Accept", "application/json")
+                    .timeout(Duration.ofSeconds(10))
+                    .GET().build();
+            int status = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString()).statusCode();
+            if (status == 200) return Map.of("connected", true);
+            if (status == 401) return Map.of("connected", false, "error", "Invalid API key (401 Unauthorized)");
+            if (status == 403) return Map.of("connected", false, "error", "Access forbidden (403)");
+            // Some OpenAI-compatible proxies don't expose /v1/models — treat 404/405 as "likely OK"
+            if (status == 404 || status == 405)
+                return Map.of("connected", true, "warning",
+                        "Models list not available (" + status + ") — chat should still work");
+            return Map.of("connected", false, "error", "Server returned HTTP " + status);
+        } catch (Exception e) {
+            return Map.of("connected", false, "error", "Connection error: " + e.getMessage());
+        }
+    }
+
+    // ── Provider initialisation helpers ──────────────────────────────────────
+
+    private ChatClient wrapWithDefaults(ChatClient.Builder b) {
+        return b.defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
+                .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
     }
 
-    public String executeStandardQuery(String input) {
-        return this.chatClient.prompt().user(input).call().content();
+    private void tryInitOpenAi(String key, String model, String baseUrl) {
+        if (!isValidKey(key)) return;
+        try {
+            String resolvedUrl = isValidUrl(baseUrl) ? baseUrl : defaultOpenAiBaseUrl;
+            OpenAiApi api = OpenAiApi.builder()
+                    .apiKey(key)
+                    .baseUrl(resolvedUrl)
+                    .build();
+            OpenAiChatOptions options = OpenAiChatOptions.builder()
+                    .model(model)
+                    .temperature(0.0)
+                    .build();
+            OpenAiChatModel chatModel = OpenAiChatModel.builder()
+                    .openAiApi(api)
+                    .defaultOptions(options)
+                    .toolCallingManager(toolCallingManager)
+                    .build();
+            providerClients.put("openai", wrapWithDefaults(ChatClient.builder(chatModel)));
+            runtimeOpenAiBaseUrl = resolvedUrl;
+            runtimeOpenAiKey = key;
+            log.info("OpenAI provider ready — model: {}, url: {}", model, resolvedUrl);
+        } catch (Exception e) {
+            log.warn("OpenAI init failed: {}", e.getMessage());
+        }
+    }
+
+    private void tryInitAnthropic(String key, String model, String baseUrl) {
+        if (!isValidKey(key)) return;
+        try {
+            String resolvedUrl = isValidUrl(baseUrl) ? baseUrl : defaultAnthropicBaseUrl;
+            AnthropicApi api = AnthropicApi.builder()
+                    .apiKey(key)
+                    .baseUrl(resolvedUrl)
+                    .build();
+            AnthropicChatOptions options = AnthropicChatOptions.builder()
+                    .model(model)
+                    .temperature(0.0)
+                    .build();
+            AnthropicChatModel chatModel = AnthropicChatModel.builder()
+                    .anthropicApi(api)
+                    .defaultOptions(options)
+                    .toolCallingManager(toolCallingManager)
+                    .build();
+            providerClients.put("anthropic", wrapWithDefaults(ChatClient.builder(chatModel)));
+            runtimeAnthropicBaseUrl = resolvedUrl;
+            runtimeAnthropicKey = key;
+            log.info("Anthropic provider ready — model: {}, url: {}", model, baseUrl);
+        } catch (Exception e) {
+            log.warn("Anthropic init failed: {}", e.getMessage());
+        }
+    }
+
+    private static boolean isValidUrl(String url) {
+        return url != null && !url.isBlank() && (url.startsWith("http://") || url.startsWith("https://"));
+    }
+
+    private static boolean isValidKey(String key) {
+        return key != null && !key.isBlank() && !key.startsWith("${");
+    }
+
+    // ── Model management (called by TradingAgentController) ───────────────────
+
+    public Map<String, Object> getModelStatus() {
+        Map<String, Object> r = new HashMap<>();
+        r.put("provider", activeProvider);
+        r.put("model", activeModel);
+        r.put("temperature", activeTemperature);
+        r.put("connected", checkConnected());
+        r.put("availableProviders", new ArrayList<>(providerClients.keySet()));
+        r.put("ollamaBaseUrl", ollamaBaseUrl);
+        r.put("openAiBaseUrl", runtimeOpenAiBaseUrl != null ? runtimeOpenAiBaseUrl : defaultOpenAiBaseUrl);
+        r.put("anthropicBaseUrl", runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl);
+        if ("ollama".equals(activeProvider)) r.put("ollamaModels", getOllamaModels());
+        return r;
+    }
+
+    public Map<String, Object> getModelConfig() {
+        Map<String, Object> r = new HashMap<>();
+        r.put("provider", activeProvider);
+        r.put("model", activeModel);
+        r.put("temperature", activeTemperature);
+        r.put("ollamaBaseUrl", ollamaBaseUrl);
+        r.put("openAiBaseUrl", runtimeOpenAiBaseUrl != null ? runtimeOpenAiBaseUrl : defaultOpenAiBaseUrl);
+        r.put("anthropicBaseUrl", runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl);
+        r.put("availableProviders", new ArrayList<>(providerClients.keySet()));
+        r.put("openAiConfigured", providerClients.containsKey("openai"));
+        r.put("anthropicConfigured", providerClients.containsKey("anthropic"));
+        return r;
+    }
+
+    public synchronized Map<String, Object> updateModelConfig(Map<String, String> config) {
+        String provider = config.getOrDefault("provider", activeProvider).toLowerCase();
+        String model    = config.getOrDefault("model", activeModel);
+        String apiKey   = config.getOrDefault("apiKey", "");
+        String baseUrl  = config.getOrDefault("baseUrl", "");
+        float  temp     = parseFloat(config.get("temperature"), activeTemperature);
+
+        if (!List.of("ollama", "openai", "anthropic").contains(provider)) {
+            return Map.of("success", false, "error", "Unknown provider: " + provider);
+        }
+
+        // Reinitialise when a new key is supplied, or when the base URL changes
+        if (!apiKey.isBlank() || !baseUrl.isBlank()) {
+            if ("openai".equals(provider))
+                tryInitOpenAi(apiKey.isBlank() ? openAiKey : apiKey, model,
+                              baseUrl.isBlank() ? defaultOpenAiBaseUrl : baseUrl);
+            if ("anthropic".equals(provider))
+                tryInitAnthropic(apiKey.isBlank() ? anthropicKey : apiKey, model,
+                                 baseUrl.isBlank() ? defaultAnthropicBaseUrl : baseUrl);
+        }
+
+        if (!providerClients.containsKey(provider)) {
+            return Map.of("success", false, "error",
+                    "Provider '" + provider + "' is not configured. Provide an API key.");
+        }
+
+        activeProvider    = provider;
+        activeModel       = model;
+        activeTemperature = temp;
+        activeApiKey      = switch (provider) {
+            case "openai"    -> runtimeOpenAiKey     != null ? runtimeOpenAiKey     : "";
+            case "anthropic" -> runtimeAnthropicKey  != null ? runtimeAnthropicKey  : "";
+            default          -> "";
+        };
+        activeBaseUrl     = switch (provider) {
+            case "openai"    -> runtimeOpenAiBaseUrl    != null ? runtimeOpenAiBaseUrl    : defaultOpenAiBaseUrl;
+            case "anthropic" -> runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl;
+            default          -> ollamaBaseUrl;
+        };
+        activeChatClient  = providerClients.get(provider);
+        saveCurrentConfig();
+
+        return Map.of("success", true, "provider", activeProvider,
+                "model", activeModel, "connected", checkConnected(),
+                "temperature", activeTemperature);
+    }
+
+    private boolean checkConnected() {
+        return switch (activeProvider) {
+            case "openai"    -> providerClients.containsKey("openai");
+            case "anthropic" -> providerClients.containsKey("anthropic");
+            default -> checkOllamaReachable();
+        };
+    }
+
+    private boolean checkOllamaReachable() {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(ollamaBaseUrl + "/api/tags"))
+                    .timeout(Duration.ofSeconds(3))
+                    .GET().build();
+            return statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString()).statusCode() == 200;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private List<String> getOllamaModels() {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(ollamaBaseUrl + "/api/tags"))
+                    .timeout(Duration.ofSeconds(5))
+                    .GET().build();
+            HttpResponse<String> res = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() != 200) return List.of();
+            JsonNode models = statusMapper.readTree(res.body()).path("models");
+            List<String> names = new ArrayList<>();
+            for (JsonNode m : models) names.add(m.path("name").asText());
+            return names;
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private static float parseFloat(String val, float fallback) {
+        if (val == null || val.isBlank()) return fallback;
+        try { return Float.parseFloat(val); } catch (NumberFormatException e) { return fallback; }
+    }
+
+    // ── Intent detection ──────────────────────────────────────────────────────
+
+    /**
+     * Extracts the first plausible ticker from the input.
+     * Checks company name aliases first, then scans for uppercase symbol tokens.
+     */
+    private String extractTicker(String raw) {
+        String lower = raw.toLowerCase(Locale.US);
+        for (Map.Entry<String, String> entry : COMPANY_TO_TICKER.entrySet()) {
+            if (lower.contains(entry.getKey())) return entry.getValue();
+        }
+        Matcher m = TICKER_PATTERN.matcher(raw.toUpperCase(Locale.US));
+        while (m.find()) {
+            String candidate = m.group(1);
+            if (candidate.length() >= 2 && !TICKER_STOP_WORDS.contains(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Classifies the user's raw input and appends an [Intent:] routing hint so the LLM
+     * calls the correct function without guessing from ambiguous phrasing.
+     */
+    private String enrichPrompt(String raw) {
+        String lower = raw.toLowerCase(Locale.US);
+
+        // 1. Pre-market intent — most specific, check first
+        if (lower.matches(".*\\b(pre.?market|premarket|before.?open|gap.?up|gap.?down|gap.?play|gapping|early.?mover|overnight.?move|pm.?scan|pm.?mover).*")
+                || lower.matches(".*(what.*(moving|movin|gapping|active).*(pre|before|early|overnight)).*")) {
+            log.info("[INTENT] preMarketScanner");
+            return raw + "\n\n[Intent: Call preMarketScannerFunction — user wants pre-market movers and gap patterns]";
+        }
+
+        // 2. Ticker extraction — happens after pre-market so stop-words filter runs cleanly
+        String ticker = extractTicker(raw);
+
+        // 3. General scanner — wins when no specific ticker is present
+        if (ticker == null && lower.matches(".*\\b(scan|scanner|market.?mover|most.?active|trending|top.?pick|hot.?stock|broad.?scan|watch.?list|top.?option|what.*trade|what.*buy|what.*play|what.*watch|movers?.?today|what.*moving).*")) {
+            log.info("[INTENT] generalMarketScanner");
+            return raw + "\n\n[Intent: Call generalMarketScannerFunction — user wants a broad market scan]";
+        }
+
+        // 4. Trend / technicals with a specific ticker
+        if (ticker != null && lower.matches(".*\\b(trend|rsi|ema|technical|chart|signal|momentum|macd|sma).*")) {
+            log.info("[INTENT] stockPrice ticker={} (technicals)", ticker);
+            return raw + "\n\n[Intent: Call stockPriceFunction for " + ticker + " and render Dashboard Output Template — user wants technical indicators]";
+        }
+
+        // 5. Bare ticker — user typed just a symbol (or symbol + a few words)
+        if (ticker != null && raw.trim().length() <= ticker.length() + 25) {
+            log.info("[INTENT] stockPrice ticker={} (bare)", ticker);
+            return raw + "\n\n[Intent: Call stockPriceFunction for " + ticker + " and render Dashboard Output Template]";
+        }
+
+        // 6. Named ticker with analysis intent
+        if (ticker != null && lower.matches(".*\\b(analyze|analysis|look at|check|price|trade|buy|sell|option|call|put|short|long|what.*(doing|think|say|look)).*")) {
+            log.info("[INTENT] stockPrice ticker={} (analysis)", ticker);
+            return raw + "\n\n[Intent: Call stockPriceFunction for " + ticker + " and render Dashboard Output Template]";
+        }
+
+        log.info("[INTENT] none — ticker={} raw routing", ticker);
+        return raw;
+    }
+
+    // ── Request pipeline ──────────────────────────────────────────────────────
+
+    private String injectDynamicContext(String input) {
+        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("America/New_York"));
+        String timeStamp   = now.format(DateTimeFormatter.ofPattern("hh:mm:ss a z"));
+        String currentDate = now.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
+        String enriched    = enrichPrompt(input);
+        return "/no_think\n" + enriched + "\n\n[System Note: Request processed at " + timeStamp + " on " + currentDate + ".]";
     }
 
     public Flux<String> streamAgentResponse(String input) {
-        return Flux.defer(() -> {
-            try {
-                String response = this.chatClient.prompt().user(input).call().content();
-                
-                if (response == null || response.trim().isEmpty()) {
-                    return Flux.just("### Pipeline Delay\nMarket processing streams returned empty data frames. Please re-submit.");
+        return Flux.concat(
+            Flux.just("__PROGRESS__:Fetching live market data..."),
+            Flux.defer(() -> {
+                ChatClient client = activeChatClient != null
+                        ? activeChatClient
+                        : providerClients.get("ollama");
+                if (client == null) {
+                    return Flux.just("### Configuration Error\nNo AI provider is configured. Open Settings to set up a model.");
                 }
-                
-                List<String> chunks = new ArrayList<>();
-                int pace = 6; 
-                for (int i = 0; i < response.length(); i += pace) {
-                    int end = Math.min(response.length(), i + pace);
-                    chunks.add(response.substring(i, end));
+
+                log.info("[REQUEST] provider={} model={} input=\"{}\"",
+                        activeProvider, activeModel,
+                        input.length() > 120 ? input.substring(0, 120) + "…" : input);
+
+                long t0 = System.currentTimeMillis();
+                var promptSpec = client.prompt().user(injectDynamicContext(input));
+                String response = switch (activeProvider) {
+                    case "openai"    -> promptSpec.options(
+                                            OpenAiChatOptions.builder().model(activeModel).build()
+                                        ).call().content();
+                    case "anthropic" -> promptSpec.options(
+                                            AnthropicChatOptions.builder().model(activeModel).maxTokens(8096).build()
+                                        ).call().content();
+                    default          -> promptSpec.call().content();
+                };
+                log.info("[RESPONSE] provider={} model={} elapsed={}ms chars={}",
+                        activeProvider, activeModel,
+                        System.currentTimeMillis() - t0,
+                        response == null ? 0 : response.length());
+
+                if (response == null || response.isBlank()) {
+                    return Flux.just("### Pipeline Delay\nMarket processing streams returned empty data frames.");
                 }
-                
-                return Flux.fromIterable(chunks)
-                           .delayElements(Duration.ofMillis(10));
-                           
-            } catch (Exception e) {
-                return Flux.just("### Pipeline Interruption\nAnalysis crashed: " + e.getMessage());
+                return Flux.just(response);
+            }).subscribeOn(Schedulers.boundedElastic())
+        ).onErrorResume(e -> {
+            log.error("[ERROR] provider={} model={} error={}", activeProvider, activeModel, e.getMessage());
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("model_not_found") || msg.contains("model not found")) {
+                return Flux.just("### Model Not Found\n" +
+                        "The model **" + activeModel + "** was not found at the configured endpoint.\n\n" +
+                        "**To fix:** click ⚙ → Edit → update **Model Name** → Test Connection → Save & Apply.");
             }
-        }).subscribeOn(Schedulers.boundedElastic());
+            if (msg.contains("401") || msg.contains("Unauthorized")) {
+                return Flux.just("### Authentication Failed\n" +
+                        "Your API key was rejected. Click ⚙ → Edit and update the API key.");
+            }
+            if (msg.contains("403") || msg.contains("Forbidden")) {
+                return Flux.just("### Access Denied\n" +
+                        "The endpoint returned 403 Forbidden. Your account may not have access to this model or endpoint.");
+            }
+            if (msg.contains("Connection refused") || msg.contains("connect timed out") || msg.contains("UnknownHost")) {
+                return Flux.just("### Connection Failed\n" +
+                        "Cannot reach the provider. Click ⚙ → Edit and verify the **Endpoint URL**.");
+            }
+            return Flux.just("### Error\n" + msg);
+        });
     }
 }
