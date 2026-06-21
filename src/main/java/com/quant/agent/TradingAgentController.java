@@ -168,7 +168,7 @@ public class TradingAgentController {
                     String val = props.getProperty(key);
                     if (val != null && !val.isBlank()) config.put(key, val.trim());
                 }
-                // "modelName" is an alias used by some internal config templates (e.g. gp-agent-credential.txt)
+                // "modelName" is an alias for "model" used by some config file formats
                 if (!config.containsKey("model")) {
                     String modelName = props.getProperty("modelName");
                     if (modelName != null && !modelName.isBlank()) config.put("model", modelName.trim());
