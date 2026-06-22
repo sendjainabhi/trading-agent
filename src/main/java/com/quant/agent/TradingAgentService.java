@@ -148,7 +148,7 @@ public class TradingAgentService {
                     You are 'AlphaQuant', a friendly trading assistant. Explain everything like you are a knowledgeable friend helping someone understand the markets — no jargon, no acronyms unless you immediately explain them in plain words right after.
 
                     MANDATORY TOOL CALLING RULE:
-                    You MUST call 'stockPriceFunction' for specific ticker inquiries — it returns all technical data including trend, RSI, EMA crossover, and trade setup in one call. You MUST call 'generalMarketScannerFunction' for broad scans, top options, or trending lists. You MUST call 'preMarketScannerFunction' for pre-market queries. Never invent data. Never call a second function for more data on the same ticker.
+                    You MUST call 'stockPriceFunction' for specific ticker inquiries — it returns all technical data including trend, RSI, EMA crossover, and trade setup in one call. You MUST call 'generalMarketScannerFunction' for broad scans, top options, or trending lists. You MUST call 'preMarketScannerFunction' for pre-market queries. You MUST call 'wheelStrategyScannerFunction' when the user says 'wheel', 'wheel strategy', 'wheel scan', 'wheel picks', 'CSP', or 'sell puts for income' — never use generalMarketScannerFunction for wheel requests. Never invent data. Never call a second function for more data on the same ticker.
 
                     PLAIN LANGUAGE TRANSLATION RULES — apply these everywhere, every time:
                     A. INDICATOR TRANSLATION:
@@ -186,6 +186,11 @@ public class TradingAgentService {
                     I. INTENT TAGS: When the message contains an [Intent: ...] tag, call the specified function immediately.
                     J. ZERO HALLUCINATION: Every number must come verbatim from the live function payload.
                     K. SMART MONEY NOTE: smart_money_score, smart_money_verdict, insider_mspr, analyst_buy/hold/sell, and smart_money_conflict are included in the stockPriceFunction payload — already blended into total_confluence_score.
+                    L. ADX TRANSLATION: adx_trend "Trending" → "Strong Trend ✅ (signals reliable)"; adx_trend "Choppy" → "No Clear Trend ⚠️ (use caution with breakout entries)".
+                    M. MARKET REGIME: When market_regime contains "HIGH FEAR" always note reduced position sizing. When "BULL MARKET" confirm long bias. When "RISK-OFF" flag caution on long entries.
+                    N. EARNINGS WARNING: If earnings_flag is true, always display the earnings warning prominently. Recommend straddle/strangle or standing aside for debit spread strategies.
+                    O. VWAP BANDS: vwap_upper_1sd is resistance, vwap_lower_1sd is support. Price above vwap_upper_1sd = extended/overbought intraday. Price below vwap_lower_1sd = oversold intraday.
+                    P. PRIOR DAY LEVELS: prior_day_high is key resistance, prior_day_low is key support — mention these as "Yesterday's High/Low" in plain English.
                     """;
 
     // ── Single-stock template — injected only for ticker queries (~5 KB) ─────
@@ -203,8 +208,10 @@ public class TradingAgentService {
                     <b style="color:[price color]">[SYMBOL] ($[current_price])</b>  |  [Short plain-English setup label]
                     Checked: [time h:mm AM/PM z]  |  Trend: <span style="color:[#28a745 if ema_crossover_status Bullish/Bullish Cross, #dc3545 if Bearish/Bearish Cross, #ffc107 if Neutral]">[translate ema_crossover_status Rule A]</span>  |  Momentum: [calculated_rsi_14d] — [RSI label Rule A]  |  Signal: [buy_score]↑ [sell_score]↓
                     What to do: <b style="color:[verdict color]">[Rule C]</b> — [One sentence explaining why]
+                    <b>[MARKET REGIME]</b>  |  [market_regime]  |  [regime_note][if earnings_flag is true: " · ⚠️ Earnings report in [earnings_days_away] day(s) ([earnings_date]) — stock can move wildly, be careful with options"]
                     <b>[LIVE SNAPSHOT]</b>  |  [session_status]  |  [Rule B]  |  VWAP: $[intraday_vwap]  |  Vol: [volume]
                     Range: $[micro_support]–$[micro_resistance]  |  Change: <span style="color:[change color]">[percent_change]</span>  |  What to watch: [One action sentence]
+                    <b>[KEY LEVELS]</b>  |  Prior Day: High <b>$[prior_day_high]</b> · Low <b>$[prior_day_low]</b>  |  VWAP Bands: <b>$[vwap_lower_1sd]</b>–<b>$[vwap_upper_1sd]</b>  |  ADX: [adx_value 1dp] ([adx_trend][if adx_trend = "Choppy": " — avoid breakout trades"])
                     <b>[PRICE TARGETS]</b> (based on [implied_volatility] expected move)
                     Tomorrow: $[tomorrow_lower]–$[tomorrow_upper]  |  Next week: $[next_week_lower]–$[next_week_upper][if custom requested:  |  [Window]: $[custom_lower]–$[custom_upper]]
                     <b>[TREND]</b>
@@ -217,13 +224,67 @@ public class TradingAgentService {
                     [if false + ACCUMULATING:] ✅ Institutions and technicals agree — buy signal confirmed by big money.
                     [if false + DISTRIBUTING:] ✅ Institutions and technicals agree — sell signal confirmed by big money.
                     [if false + NEUTRAL:] Smart money is on the sidelines — rely on technicals.
-                    <b>[TRADE SETUP]</b>
-                    <b style="color:[#28a745 if score>+15, #dc3545 if score<-15, #ffc107]">[strategy_name]</b> — [1-2 plain-English sentences on entry timing; mention smart money if relevant]
-                    [Output ONLY the matching price line — never print the condition label:]
-                    [If total_confluence_score > +15:] <b>Enter at:</b> $[final_entry]  |  <b>Take profit at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_entry−final_sl, 2dp] → Gain $[final_tp−final_entry, 2dp]
-                    [If total_confluence_score < −15:] <b>Enter/Sell at:</b> $[final_entry]  |  <b>Cover at:</b> $[final_tp]  |  <b>Stop loss:</b> $[final_sl]  |  <b>R/R:</b> 2:1  |  Risk $[final_sl−final_entry, 2dp] → Gain $[final_entry−final_tp, 2dp]
-                    [If between −15 and +15:] Watch: Break above $[micro_resistance] → buy  |  Drop below $[micro_support] → sell  |  Stop if holding: $[final_sl]
-                    <b>Options</b> ([strategy_name]): [options_line]
+                    <b>[WHAT TO DO]</b>
+                    [Output ONLY the matching block — never print the condition label:]
+                    [If total_confluence_score > +15:]
+                    <b style="color:#28a745">📈 Strong Buy</b> · <i>[strategy_name]</i> — upside bet, you pay a fixed fee upfront, that's your max loss.
+                    <b>Entry:</b> $[final_entry]  |  <b>Target Profit:</b> $[final_tp]  |  <b>Stop Loss:</b> $[final_sl]
+                    Risk $[final_entry−final_sl, 2dp] · Potential gain $[final_tp−final_entry, 2dp]
+                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
+                    [If total_confluence_score < −15:]
+                    <b style="color:#dc3545">📉 Strong Sell</b> · <i>[strategy_name]</i> — downside bet, you pay a fixed fee upfront, that's your max loss.
+                    <b>Entry:</b> $[final_entry]  |  <b>Target Profit:</b> $[final_tp]  |  <b>Stop Loss:</b> $[final_sl]
+                    Risk $[final_sl−final_entry, 2dp] · Potential gain $[final_entry−final_tp, 2dp]
+                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
+                    [If between −15 and +15:]
+                    <b style="color:#ffc107">⏳ No Clear Signal Yet</b> · <i>[strategy_name]</i>
+                    Watch: breaks above $[micro_resistance] → consider buying  |  drops below $[micro_support] → consider selling  |  Stop Loss: $[final_sl]
+                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
+                    <b>Options play:</b> [options_line]
+                    """;
+
+    // ── Wheel strategy template ───────────────────────────────────────────────
+    private static final String WHEEL_TEMPLATE = """
+                    ── WHEEL STRATEGY TEMPLATE ───────────────────────────────────────────────────
+                    (Use ONLY when payload contains wheel_candidates. Show all picks immediately.)
+
+                    WHEEL STRATEGY — How it works (show this once at the top, in plain English):
+                    "You sell a put option and collect cash upfront. If the stock stays above your strike, you keep the cash and repeat. If it drops below, you buy the stock — then sell a call to collect more cash while you wait to exit."
+
+                    <b>🎡 Wheel Strategy Picks — Top [count] picks ranked by weekly income</b>
+                    Scanned: [scan_date]
+
+                    Render ONE table with ALL candidates. No blocks, no dividers between rows.
+
+                    <table>
+                    <tr>
+                      <th>Stock</th>
+                      <th>Price</th>
+                      <th>Type</th>
+                      <th>IV</th>
+                      <th>Sell Put Strike</th>
+                      <th>You Collect</th>
+                      <th>Weekly Income</th>
+                      <th>Capital Needed</th>
+                      <th>Expiry</th>
+                      <th>If Assigned → Sell Call</th>
+                    </tr>
+                    [One <tr> per wheel_candidate:]
+                    <tr>
+                      <td><b>[ticker]</b></td>
+                      <td>$[price]</td>
+                      <td>[if is_etf: "Leveraged ETF ⚠️" else "Stock"]</td>
+                      <td>[iv]%</td>
+                      <td>$[put_strike] ([pct_otm = (price−put_strike)/price×100, 1dp]% below price)</td>
+                      <td>~$[put_premium]/share = $[total_premium_per_contract] per contract</td>
+                      <td><b style="color:#28a745">[weekly_return_pct]%</b></td>
+                      <td>$[put_strike × 100, 0dp]</td>
+                      <td>[expiry]</td>
+                      <td>$[call_strike] strike · collect ~$[call_premium × 100, 0dp] per contract</td>
+                    </tr>
+                    </table>
+
+                    After the table, show one line: ⚠️ Leveraged ETF note: if assigned on any ETF, sell the covered call immediately and exit within 1–2 weeks — these decay over time.
                     """;
 
     // ── Market scanner table — injected only for scan queries (~3 KB) ────────
@@ -283,8 +344,8 @@ public class TradingAgentService {
 
     public TradingAgentService(ChatClient.Builder chatClientBuilder) {
         this.ollamaClientBuilder = chatClientBuilder
-                .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE)
-                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
+                .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE + WHEEL_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction", "wheelStrategyScannerFunction")
                 .defaultAdvisors(new SimpleLoggerAdvisor());
     }
 
@@ -441,8 +502,8 @@ public class TradingAgentService {
     // ── Provider initialisation helpers ──────────────────────────────────────
 
     private ChatClient wrapWithDefaults(ChatClient.Builder b) {
-        return b.defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE)
-                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction")
+        return b.defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE + WHEEL_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction", "wheelStrategyScannerFunction")
                 .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
     }
@@ -653,6 +714,12 @@ public class TradingAgentService {
      */
     private String enrichPrompt(String raw) {
         String lower = raw.toLowerCase(Locale.US);
+
+        // 0. Wheel strategy intent — check before everything else
+        if (lower.matches(".*\\b(wheel|csp|cash.?secured.?put|sell.?put.*income|put.*sell.*income|wheel.?scan|wheel.?pick|wheel.?strategy).*")) {
+            log.info("[INTENT] wheelStrategy");
+            return raw + "\n\n[Intent: Call wheelStrategyScannerFunction — user wants wheel strategy picks]";
+        }
 
         // 1. Pre-market intent — most specific, check first
         if (lower.matches(".*\\b(pre.?market|premarket|before.?open|gap.?up|gap.?down|gap.?play|gapping|early.?mover|overnight.?move|pm.?scan|pm.?mover).*")

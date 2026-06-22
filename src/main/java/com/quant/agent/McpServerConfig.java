@@ -22,7 +22,10 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -142,6 +145,40 @@ public class McpServerConfig {
         return sum / count;
     }
 
+    private double calculateAdxFromBars(JsonNode bars, int period) {
+        int len = bars.size();
+        if (len < period * 2 + 1) return 25.0;
+        double[] tr  = new double[len];
+        double[] pdm = new double[len];
+        double[] mdm = new double[len];
+        for (int i = 1; i < len; i++) {
+            double h  = bars.get(i).path("h").asDouble();
+            double l  = bars.get(i).path("l").asDouble();
+            double prevH = bars.get(i - 1).path("h").asDouble();
+            double prevL = bars.get(i - 1).path("l").asDouble();
+            double prevC = bars.get(i - 1).path("c").asDouble();
+            tr[i]  = Math.max(h - l, Math.max(Math.abs(h - prevC), Math.abs(l - prevC)));
+            double up   = h - prevH, down = prevL - l;
+            pdm[i] = (up > down && up > 0)     ? up   : 0;
+            mdm[i] = (down > up && down > 0) ? down : 0;
+        }
+        double tr14 = 0, pdm14 = 0, mdm14 = 0;
+        for (int i = 1; i <= period; i++) { tr14 += tr[i]; pdm14 += pdm[i]; mdm14 += mdm[i]; }
+        double pdi = tr14 > 0 ? 100.0 * pdm14 / tr14 : 0;
+        double mdi = tr14 > 0 ? 100.0 * mdm14 / tr14 : 0;
+        double adx = (pdi + mdi) > 0 ? 100.0 * Math.abs(pdi - mdi) / (pdi + mdi) : 0;
+        for (int i = period + 1; i < len; i++) {
+            tr14  = tr14  - (tr14  / period) + tr[i];
+            pdm14 = pdm14 - (pdm14 / period) + pdm[i];
+            mdm14 = mdm14 - (mdm14 / period) + mdm[i];
+            pdi = tr14 > 0 ? 100.0 * pdm14 / tr14 : 0;
+            mdi = tr14 > 0 ? 100.0 * mdm14 / tr14 : 0;
+            double dx = (pdi + mdi) > 0 ? 100.0 * Math.abs(pdi - mdi) / (pdi + mdi) : 0;
+            adx = ((adx * (period - 1)) + dx) / period;
+        }
+        return adx;
+    }
+
     private double extractConfluenceScore(String tickerJson) {
         try {
             return objectMapper.readTree(tickerJson).path("total_confluence_score").asDouble(0.0);
@@ -153,7 +190,7 @@ public class McpServerConfig {
     private String processIntradayMtfAlignment(String ticker, double currentPrice, double highToday, double lowToday, long totalVolume, double priorClose, int customDays) throws Exception {
         ZonedDateTime nowET = ZonedDateTime.now(ZoneId.of("America/New_York"));
         
-        String lookback45Days = nowET.minusDays(45).format(DateTimeFormatter.ISO_INSTANT);
+        String lookback45Days = nowET.minusDays(90).format(DateTimeFormatter.ISO_INSTANT); // 90d → ~63 bars, enough for ADX(14) convergence
         String lookback10Days = nowET.minusDays(10).format(DateTimeFormatter.ISO_INSTANT);
         String lookback5Days = nowET.minusDays(5).format(DateTimeFormatter.ISO_INSTANT);
 
@@ -177,6 +214,23 @@ public class McpServerConfig {
 
         String sessionStatus = marketClockService.toPlainEnglish();
 
+        LocalDate today = nowET.toLocalDate();
+        String earningsFrom = today.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+        String earningsTo   = today.plusDays(Math.max(customDays > 0 ? customDays : 14, 14)).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+        double adxValue = 25.0;
+        String adxTrend = "Neutral";
+        double priorDayHigh = 0.0;
+        double priorDayLow  = 0.0;
+        double vwapUpper = 0.0;
+        double vwapLower = 0.0;
+        double spyScore = 0.0;
+        String spyTrend = "Neutral";
+        double vixLevel = 20.0;
+        String marketRegime = "NEUTRAL";
+        boolean earningsFlag = false;
+        String earningsDate = "";
+        int earningsDaysAway = 999;
+
         String insiderFrom = nowET.minusMonths(3).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
         String insiderTo   = nowET.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
 
@@ -185,9 +239,23 @@ public class McpServerConfig {
         CompletableFuture<HttpResponse<String>> futureM15 = httpClient.sendAsync(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=15Min&start=" + lookback5Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureM5 = httpClient.sendAsync(buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=5Min&start=" + lookback5Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureOptions = httpClient.sendAsync(buildAlpacaBaseRequest("/v1beta1/options/snapshots/" + ticker + "?feed=indicative&strike_price_gte=" + (currentPrice * 0.98) + "&strike_price_lte=" + (currentPrice * 1.02) + "&limit=50"), HttpResponse.BodyHandlers.ofString());
-        CompletableFuture<HttpResponse<String>> futureSentiment = httpClient.sendAsync(
-                HttpRequest.newBuilder().uri(URI.create("https://finnhub.io/api/v1/news-sentiment?symbol=" + ticker + "&token=" + finnhubKey))
+        CompletableFuture<HttpResponse<String>> futureNews = httpClient.sendAsync(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("https://data.alpaca.markets/v1beta1/news?symbols=" + ticker + "&limit=20&sort=desc"))
+                        .header("APCA-API-KEY-ID", apiKey != null ? apiKey : "")
+                        .header("APCA-API-SECRET-KEY", apiSecret != null ? apiSecret : "")
+                        .header("accept", "application/json")
+                        .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        CompletableFuture<HttpResponse<String>> futureEarnings = httpClient.sendAsync(
+                HttpRequest.newBuilder().uri(URI.create("https://finnhub.io/api/v1/calendar/earnings?symbol=" + ticker + "&from=" + earningsFrom + "&to=" + earningsTo + "&token=" + finnhubKey))
                         .timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        CompletableFuture<HttpResponse<String>> futureSpy = httpClient.sendAsync(
+                buildAlpacaRequest("/bars?symbols=SPY&timeframe=1Day&start=" + lookback45Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
+        CompletableFuture<HttpResponse<String>> futureVix = httpClient.sendAsync(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=5d"))
+                        .header("User-Agent", "Mozilla/5.0")
+                        .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureInsider = httpClient.sendAsync(
                 HttpRequest.newBuilder().uri(URI.create("https://finnhub.io/api/v1/stock/insider-sentiment?symbol=" + ticker + "&from=" + insiderFrom + "&to=" + insiderTo + "&token=" + finnhubKey))
                         .timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
@@ -195,7 +263,7 @@ public class McpServerConfig {
                 HttpRequest.newBuilder().uri(URI.create("https://finnhub.io/api/v1/stock/recommendation?symbol=" + ticker + "&token=" + finnhubKey))
                         .timeout(Duration.ofSeconds(3)).GET().build(), HttpResponse.BodyHandlers.ofString());
 
-        CompletableFuture.allOf(futureD1, futureH1, futureM15, futureM5, futureOptions, futureSentiment, futureInsider, futureRec).join();
+        CompletableFuture.allOf(futureD1, futureH1, futureM15, futureM5, futureOptions, futureNews, futureEarnings, futureSpy, futureVix, futureInsider, futureRec).join();
 
         if (futureD1.get().statusCode() == 200) {
             JsonNode tickerNode = objectMapper.readTree(futureD1.get().body()).path("bars").path(ticker);
@@ -219,6 +287,14 @@ public class McpServerConfig {
 
                 calculatedSupport    = atr14 > 0 ? currentPrice - (1.5 * atr14) : currentPrice * 0.96;
                 calculatedResistance = atr14 > 0 ? currentPrice + (1.5 * atr14) : currentPrice * 1.04;
+                // ADX (Average Directional Index) — trend strength from daily bars
+                adxValue = d1sz >= 40 ? calculateAdxFromBars(tickerNode, 14) : 25.0;
+                adxTrend = adxValue >= 25 ? "Trending" : "Choppy";
+                // Prior day high/low — key institutional support/resistance levels
+                if (d1sz >= 2) {
+                    priorDayHigh = tickerNode.get(d1sz - 2).path("h").asDouble();
+                    priorDayLow  = tickerNode.get(d1sz - 2).path("l").asDouble();
+                }
                 // 20-day Historical Realized Volatility from daily log returns
                 int d1len = tickerNode.size();
                 if (d1len >= 22) {
@@ -284,17 +360,27 @@ public class McpServerConfig {
                 long startOfDayEpoch = Instant.ofEpochSecond(lastCandleTime).atZone(ZoneId.of("America/New_York")).toLocalDate().atStartOfDay(ZoneId.of("America/New_York")).toEpochSecond();
                 
                 double cumulativeTPV = 0; double cumulativeVol = 0;
-                
+                List<double[]> tpvPairs = new ArrayList<>();
                 for(int i = 0; i < size; i++) {
                     JsonNode bar = tickerNode.get(i);
                     if(Instant.parse(bar.path("t").asText()).getEpochSecond() >= startOfDayEpoch) {
                         double h = bar.path("h").asDouble();
                         double l = bar.path("l").asDouble();
-                        cumulativeTPV += ((h + l + bar.path("c").asDouble()) / 3.0) * bar.path("v").asLong();
-                        cumulativeVol += bar.path("v").asLong();
+                        double tp = (h + l + bar.path("c").asDouble()) / 3.0;
+                        long v = bar.path("v").asLong();
+                        cumulativeTPV += tp * v;
+                        cumulativeVol += v;
+                        tpvPairs.add(new double[]{tp, v});
                     }
                 }
-                if (cumulativeVol > 0) vwap = cumulativeTPV / cumulativeVol;
+                if (cumulativeVol > 0) {
+                    vwap = cumulativeTPV / cumulativeVol;
+                    double sumDevSq = 0;
+                    for (double[] pair : tpvPairs) { double dev = pair[0] - vwap; sumDevSq += pair[1] * dev * dev; }
+                    double vwapStd = Math.sqrt(sumDevSq / cumulativeVol);
+                    vwapUpper = vwap + vwapStd;
+                    vwapLower = vwap - vwapStd;
+                }
                 double m5c1 = lastCandle.path("c").asDouble();
                 double m5c2 = size >= 2 ? tickerNode.get(size - 2).path("c").asDouble() : m5c1;
                 double m5c3 = size >= 3 ? tickerNode.get(size - 3).path("c").asDouble() : m5c2;
@@ -310,14 +396,44 @@ public class McpServerConfig {
 
         double sentimentScore = 0.0;
         try {
-            if (futureSentiment.get().statusCode() == 200) {
-                JsonNode sentNode = objectMapper.readTree(futureSentiment.get().body());
-                double bullPct = sentNode.path("sentiment").path("bullishPercent").asDouble(0.5);
-                double bearPct = sentNode.path("sentiment").path("bearishPercent").asDouble(0.5);
-                double buzz = sentNode.path("buzz").path("buzz").asDouble(1.0);
-                double weeklyAvg = sentNode.path("buzz").path("weeklyAverage").asDouble(1.0);
-                double buzzMultiplier = weeklyAvg > 0 ? Math.min(1.5, buzz / weeklyAvg) : 1.0;
-                sentimentScore = Math.max(-100.0, Math.min(100.0, (bullPct - bearPct) * buzzMultiplier * 100.0));
+            if (futureNews.get().statusCode() == 200) {
+                JsonNode newsRoot = objectMapper.readTree(futureNews.get().body());
+                JsonNode articles = newsRoot.path("news");
+                if (articles.isArray() && !articles.isEmpty()) {
+                    Set<String> bullishKw = Set.of("beat","beats","upgrade","upgraded","record","surge",
+                            "surges","growth","raises","strong","exceed","exceeds","bullish",
+                            "profit","gains","rally","outperform","expansion","raised","positive","buy");
+                    Set<String> bearishKw = Set.of("miss","misses","downgrade","downgraded","cut","cuts",
+                            "concern","concerns","lawsuit","investigation","warn","warns","bearish",
+                            "loss","losses","decline","disappoints","underperform","layoffs",
+                            "recall","fraud","penalty","sell");
+                    int bullCount = 0, bearCount = 0, articlesProcessed = 0;
+                    for (JsonNode article : articles) {
+                        // Time-decay: newer articles get more weight
+                        String createdAt = article.path("created_at").asText("");
+                        double ageWeight = 1.0;
+                        if (!createdAt.isEmpty()) {
+                            try {
+                                long ageMinutes = (System.currentTimeMillis() / 1000 -
+                                        Instant.parse(createdAt).getEpochSecond()) / 60;
+                                ageWeight = ageMinutes < 30 ? 2.0 : ageMinutes < 120 ? 1.5 : 1.0;
+                            } catch (Exception ignored2) {}
+                        }
+                        String text = (article.path("headline").asText("") + " "
+                                + article.path("summary").asText("")).toLowerCase();
+                        for (String w : text.split("\\W+")) {
+                            if (bullishKw.contains(w)) bullCount += (int)(ageWeight * 1);
+                            else if (bearishKw.contains(w)) bearCount += (int)(ageWeight * 1);
+                        }
+                        articlesProcessed++;
+                    }
+                    int total = bullCount + bearCount;
+                    if (total > 0) {
+                        double buzzMultiplier = Math.min(1.5, 1.0 + (articlesProcessed - 1) * 0.05);
+                        sentimentScore = Math.max(-100.0, Math.min(100.0,
+                                ((double)(bullCount - bearCount) / total) * buzzMultiplier * 100.0));
+                    }
+                }
             }
         } catch (Exception ignored) {}
 
@@ -395,6 +511,73 @@ public class McpServerConfig {
             totalConfluenceScore *= 0.70; // reduce by 30% when big money disagrees with chart
         }
 
+        // ── Earnings event awareness ──────────────────────────────────────────
+        try {
+            if (futureEarnings.get().statusCode() == 200) {
+                JsonNode earningsRoot = objectMapper.readTree(futureEarnings.get().body());
+                JsonNode earningsData = earningsRoot.path("earningsCalendar");
+                if (earningsData.isArray()) {
+                    for (JsonNode event : earningsData) {
+                        String dateStr = event.path("date").asText("");
+                        if (!dateStr.isEmpty()) {
+                            LocalDate eventDate = LocalDate.parse(dateStr);
+                            int daysAway = (int)(eventDate.toEpochDay() - today.toEpochDay());
+                            LocalDate earningsToDate = LocalDate.parse(earningsTo);
+                            if (daysAway >= 0 && !eventDate.isAfter(earningsToDate)) {
+                                earningsFlag = true;
+                                earningsDate = dateStr;
+                                earningsDaysAway = daysAway;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // ── Market regime: SPY trend + VIX fear gauge ─────────────────────────
+        try {
+            if (futureSpy.get().statusCode() == 200) {
+                JsonNode spyBars = objectMapper.readTree(futureSpy.get().body()).path("bars").path("SPY");
+                if (spyBars.isArray() && spyBars.size() >= 22) {
+                    double spySma20 = calculateSmaFromBars(spyBars, 20);
+                    double spyRsi   = calculateRsiFromBars(spyBars, 14);
+                    double spyPrice = spyBars.get(spyBars.size() - 1).path("c").asDouble();
+                    double smaScore = spySma20 > 0 ? ((spyPrice - spySma20) / spySma20) * 250.0 : 0;
+                    double rsiScore = (spyRsi - 50.0) * 1.5;
+                    spyScore = Math.max(-100, Math.min(100, (smaScore * 0.6) + (rsiScore * 0.4)));
+                    spyTrend = spyScore > 20 ? "Bull" : spyScore < -20 ? "Bear" : "Neutral";
+                }
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            if (futureVix.get().statusCode() == 200) {
+                JsonNode vixMeta = objectMapper.readTree(futureVix.get().body())
+                        .path("chart").path("result").path(0).path("meta");
+                vixLevel = vixMeta.path("regularMarketPrice").asDouble(20.0);
+            }
+        } catch (Exception ignored) {}
+
+        // Compute final regime label and apply multiplier to confluenceScore
+        double regimeMultiplier = 1.0;
+        if (vixLevel > 30) {
+            regimeMultiplier = totalConfluenceScore > 0 ? 0.65 : 1.15;
+            marketRegime = "HIGH FEAR — VIX " + String.format("%.1f", vixLevel);
+        } else if (vixLevel > 22 && spyScore < -15) {
+            regimeMultiplier = totalConfluenceScore > 0 ? 0.80 : 1.10;
+            marketRegime = "RISK-OFF — VIX " + String.format("%.1f", vixLevel) + " · SPY " + spyTrend;
+        } else if (spyScore > 20 && vixLevel < 20) {
+            regimeMultiplier = totalConfluenceScore > 0 ? 1.10 : 0.90;
+            marketRegime = "BULL MARKET — VIX " + String.format("%.1f", vixLevel) + " · SPY " + spyTrend;
+        } else {
+            marketRegime = "NEUTRAL — VIX " + String.format("%.1f", vixLevel) + " · SPY " + spyTrend;
+        }
+        totalConfluenceScore = Math.max(-100.0, Math.min(100.0, totalConfluenceScore * regimeMultiplier));
+        String regimeNote = vixLevel > 30 ? "⚠️ HIGH FEAR — reduce position size, widen stops"
+                          : (vixLevel > 22 && spyScore < -15) ? "📊 Elevated volatility — be selective"
+                          : "✅ Normal conditions";
+
         double impliedVolatility = 0.0;
         if (futureOptions.get().statusCode() == 200) {
             JsonNode snapshots = objectMapper.readTree(futureOptions.get().body()).path("snapshots");
@@ -454,7 +637,9 @@ public class McpServerConfig {
         // Scale ATR multiplier and R:R to the trade timeframe.
         // Daily ATR is the natural unit of market noise — stop must sit outside it.
         double atrStopMult;
-        double rrRatio = 2.0;   // fixed 2:1 R:R across all timeframes
+        double rrRatio = Math.abs(totalConfluenceScore) >= 70 ? 3.5
+                       : Math.abs(totalConfluenceScore) >= 40 ? 2.5
+                       : 1.8;
         if (customDays == 0) {
             atrStopMult = 1.0;   // intraday: 1× ATR stop
         } else if (customDays <= 5) {
@@ -555,8 +740,17 @@ public class McpServerConfig {
         // 2. RSI momentum
         //    Buy:  45–72 = healthy upward momentum, not yet overbought
         //    Sell: < 45  = momentum fading  OR  > 72 = overbought, due for pullback
-        boolean rsiBullish = rsi14 >= 45 && rsi14 <= 72;
-        boolean rsiBearish = rsi14 < 45  || rsi14 > 72;
+        boolean rsiBullish, rsiBearish;
+        if ("Bullish".equals(emaCrossoverStatus) || "Bullish Cross".equals(emaCrossoverStatus)) {
+            rsiBullish = rsi14 >= 50 && rsi14 <= 80;
+            rsiBearish = rsi14 < 50  || rsi14 > 85;
+        } else if ("Bearish".equals(emaCrossoverStatus) || "Bearish Cross".equals(emaCrossoverStatus)) {
+            rsiBullish = rsi14 >= 40 && rsi14 <= 60;
+            rsiBearish = rsi14 < 40  || rsi14 > 60;
+        } else {
+            rsiBullish = rsi14 >= 45 && rsi14 <= 72;
+            rsiBearish = rsi14 < 45  || rsi14 > 72;
+        }
         if (rsiBullish) buyScore++;
         if (rsiBearish) sellScore++;
 
@@ -615,7 +809,6 @@ public class McpServerConfig {
                 ? sellSignalsStr.toString().replaceAll(",\\s*$", "")
                 : "No sell signals active";
 
-        LocalDate today = nowET.toLocalDate();
         LocalDate expDate;
         if (customDays == 0) {
             expDate = today.with(TemporalAdjusters.next(DayOfWeek.FRIDAY));
@@ -627,6 +820,11 @@ public class McpServerConfig {
             }
         }
         String targetExpiration = expDate.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
+
+        // Position sizing — based on $200 max risk per trade
+        int suggestedShares    = stopDistance > 0 ? (int) Math.floor(200.0 / stopDistance) : 0;
+        int suggestedContracts = (spreadWidth * 100.0) > 0 ? Math.max(1, (int) Math.floor(200.0 / (spreadWidth * 100.0))) : 1;
+        String rrDisplay = String.format("%.1f", rrRatio);
 
         // Pre-computed strategy name and options line — model outputs these verbatim, zero reasoning required
         String strategyName;
@@ -655,13 +853,25 @@ public class McpServerConfig {
                 + ",\"active_buy_signals\":\"%s\",\"active_sell_signals\":\"%s\""
                 + ",\"smart_money_score\":%.1f,\"smart_money_verdict\":\"%s\",\"smart_money_conflict\":%b"
                 + ",\"insider_mspr\":%.4f,\"insider_buys\":%d,\"insider_sells\":%d"
-                + ",\"analyst_buy\":%d,\"analyst_hold\":%d,\"analyst_sell\":%d",
+                + ",\"analyst_buy\":%d,\"analyst_hold\":%d,\"analyst_sell\":%d"
+                + ",\"market_regime\":\"%s\",\"regime_note\":\"%s\",\"vix_level\":%.1f,\"spy_trend\":\"%s\""
+                + ",\"adx_value\":%.1f,\"adx_trend\":\"%s\""
+                + ",\"prior_day_high\":%.2f,\"prior_day_low\":%.2f"
+                + ",\"vwap_upper_1sd\":%.2f,\"vwap_lower_1sd\":%.2f"
+                + ",\"earnings_flag\":%b,\"earnings_date\":\"%s\",\"earnings_days_away\":%d"
+                + ",\"suggested_shares\":%d,\"suggested_contracts\":%d,\"rr_ratio\":\"%s\"",
                 sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, customDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, spreadShortStrike, strikeSell, targetExpiration, strategyName, optionsLine, emaCrossoverStatus, rsi14, calculatedSupport, calculatedResistance,
                 buyStrength, buyScore, sellScore, rsi14,
                 activeBuySignals, activeSellSignals,
                 smartMoneyScore, smartMoneyVerdict, smConflict,
                 insiderMspr, insiderBuys, insiderSells,
-                analystBuy, analystHold, analystSell);
+                analystBuy, analystHold, analystSell,
+                marketRegime, regimeNote, vixLevel, spyTrend,
+                adxValue, adxTrend,
+                priorDayHigh, priorDayLow,
+                vwapUpper, vwapLower,
+                earningsFlag, earningsDate, earningsDaysAway,
+                suggestedShares, suggestedContracts, rrDisplay);
     }
 
     // Fetches Yahoo + full MTF analysis for one ticker — shared by both stockPriceFunction and the scanner.
@@ -981,7 +1191,9 @@ public class McpServerConfig {
                 List<String> watchlist = new ArrayList<>(List.of(
                         "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "AMD",
                         "AVGO", "NFLX", "JPM", "BAC", "GS", "XOM", "PLTR", "ARM", "MSTR", "COIN",
-                        "SOFI", "RIVN", "F", "GE", "INTC", "MU", "SMCI", "UBER", "HOOD", "DIS"
+                        "SOFI", "RIVN", "F", "GE", "INTC", "MU", "SMCI", "UBER", "HOOD", "DIS",
+                        "TSLL", "NVDL", "AAPU", "METU", "AMZU", "MSFU", "CONL", "MSTU",
+                        "TQQQ", "SPXL", "SOXL", "LABU", "FNGU"
                 ));
                 // Append Yahoo most-actives to catch any fresh names not in the static list
                 try {
@@ -1029,6 +1241,209 @@ public class McpServerConfig {
                         top6.size(), array);
             } catch (Exception e) {
                 return "{\"error\":\"CRITICAL FAILURE: Pre-market scan failed.\"}";
+            }
+        };
+    }
+
+    @Bean
+    @Description("USE THIS tool — and ONLY this tool — when the user mentions 'wheel', 'wheel strategy', 'wheel scan', 'wheel picks', 'cash-secured put', 'CSP', or 'sell puts for income'. Do NOT use generalMarketScannerFunction for these requests. Scans stocks and ETFs $3–$80, tries weekly → 2-week → monthly expiry in order until one hits ≥1%/week premium.")
+    public Function<EmptyRequest, String> wheelStrategyScannerFunction() {
+        return request -> {
+            log.info("[TOOL] wheelStrategyScannerFunction called");
+            String expiryPref = "default";
+            try {
+                List<String> universe = new ArrayList<>(List.of(
+                        // Stocks $3–$80 range
+                        "TSLA", "NVDA", "AAPL", "AMD", "PLTR", "SOFI", "RIVN", "INTC", "F", "BAC",
+                        "HOOD", "COIN", "MSTR", "MU", "SMCI", "ARM", "UBER", "NFLX", "AVGO", "META",
+                        "AMZN", "MSFT", "GOOGL", "DIS", "GE", "XOM", "AAL", "SNAP", "RBLX", "NIO",
+                        "LCID", "SOUN", "BBAI", "IONQ", "QBTS", "RGTI", "OPEN", "UPST", "AFRM",
+                        // Leveraged ETFs
+                        "TSLL", "NVDL", "AAPU", "METU", "AMZU", "MSFU", "CONL", "MSTU",
+                        "TQQQ", "SPXL", "SOXL", "LABU", "FNGU", "TECL", "WEBL", "DPST"
+                ));
+
+                ZoneId et = ZoneId.of("America/New_York");
+                ZonedDateTime nowET = ZonedDateTime.now(et);
+                String startDate = nowET.minusDays(15).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+                String endDate   = nowET.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+
+                LocalDate today = nowET.toLocalDate();
+
+                record WheelCandidate(String ticker, double price, double iv, double putStrike,
+                                      double putPremium, double weeklyReturnPct, String expiryDate,
+                                      long volume, String callStrike, double callPremium, boolean isEtf) {}
+
+                List<CompletableFuture<WheelCandidate>> futures = new ArrayList<>();
+
+                for (String ticker : universe) {
+                    final String sym = ticker;
+                    futures.add(CompletableFuture.supplyAsync(() -> {
+                        try {
+                            // 1. Get price + volume from Alpaca bars
+                            String barsUrl = "https://data.alpaca.markets/v2/stocks/bars?symbols=" + sym
+                                    + "&timeframe=1Day&start=" + startDate + "&end=" + endDate + "&limit=15&feed=iex";
+                            HttpRequest barsReq = HttpRequest.newBuilder().uri(URI.create(barsUrl))
+                                    .header("APCA-API-KEY-ID", apiKey)
+                                    .header("APCA-API-SECRET-KEY", apiSecret).GET().build();
+                            HttpResponse<String> barsResp = httpClient.send(barsReq, HttpResponse.BodyHandlers.ofString());
+                            if (barsResp.statusCode() != 200) return null;
+                            JsonNode bars = objectMapper.readTree(barsResp.body()).path("bars").path(sym);
+                            if (!bars.isArray() || bars.size() < 3) return null;
+                            double price = bars.get(bars.size() - 1).path("c").asDouble(0);
+                            long volume  = bars.get(bars.size() - 1).path("v").asLong(0);
+
+                            // Filter: price $3–$80, volume > 1M
+                            if (price < 3.0 || price > 80.0) return null;
+                            if (volume < 1_000_000) return null;
+
+                            // 2. Trend check — must be bullish or neutral (daily SMA20)
+                            double sma10 = calculateSmaFromBars(bars, Math.min(10, bars.size()));
+                            // Bearish: recent bars consistently below sma10
+                            double last3avg = 0;
+                            int last3cnt = Math.min(3, bars.size());
+                            for (int i = bars.size() - last3cnt; i < bars.size(); i++)
+                                last3avg += bars.get(i).path("c").asDouble();
+                            last3avg /= last3cnt;
+                            if (sma10 > 0 && last3avg < sma10 * 0.95) return null; // strongly bearish — skip
+
+                            // 3. Get near-ATM IV from today's options snapshot
+                            String optUrl = "https://data.alpaca.markets/v1beta1/options/snapshots/" + sym
+                                    + "?feed=indicative&strike_price_gte=" + (price * 0.95)
+                                    + "&strike_price_lte=" + (price * 1.05) + "&limit=20";
+                            HttpRequest optReq = HttpRequest.newBuilder().uri(URI.create(optUrl))
+                                    .header("APCA-API-KEY-ID", apiKey)
+                                    .header("APCA-API-SECRET-KEY", apiSecret).GET().build();
+                            HttpResponse<String> optResp = httpClient.send(optReq, HttpResponse.BodyHandlers.ofString());
+
+                            double iv = 0;
+                            if (optResp.statusCode() == 200) {
+                                JsonNode snapshots = objectMapper.readTree(optResp.body()).path("snapshots");
+                                Iterator<Map.Entry<String, JsonNode>> it = snapshots.fields();
+                                double ivSum = 0; int ivCount = 0;
+                                while (it.hasNext()) {
+                                    Map.Entry<String, JsonNode> entry = it.next();
+                                    // Parse IV from bid/ask spread as proxy: mid/price ≈ IV×sqrt(T/365)
+                                    JsonNode snap = entry.getValue();
+                                    double ap = snap.path("latestQuote").path("ap").asDouble(0);
+                                    double bp = snap.path("latestQuote").path("bp").asDouble(0);
+                                    if (ap <= 0 || bp <= 0) continue;
+                                    double mid = (ap + bp) / 2.0;
+                                    // Back-calculate IV: IV ≈ mid / (price * sqrt(1/52)) for ~1-week ATM
+                                    double rawIv = (price > 0) ? (mid / price) * Math.sqrt(52.0) : 0;
+                                    if (rawIv > 0.10 && rawIv < 5.0) { ivSum += rawIv; ivCount++; }
+                                }
+                                if (ivCount > 0) iv = ivSum / ivCount;
+                            }
+
+                            // Filter: IV must be > 30%
+                            if (iv < 0.30) return null;
+
+                            // Put strike: 12.5% OTM, rounded to nearest $0.50
+                            double putStrikeRaw = price * 0.875;
+                            double putStrike = Math.round(putStrikeRaw * 2.0) / 2.0;
+                            double capital = putStrike * 100.0;
+
+                            // Build candidate expiry windows based on user preference
+                            // weekly = next Friday ≥7 days, biweekly = next Friday ≥14 days, monthly = next Friday ≥28 days
+                            LocalDate wkExp = today.plusDays(7);
+                            while (wkExp.getDayOfWeek().getValue() != 5) wkExp = wkExp.plusDays(1);
+                            LocalDate bwExp = today.plusDays(14);
+                            while (bwExp.getDayOfWeek().getValue() != 5) bwExp = bwExp.plusDays(1);
+                            LocalDate moExp = today.plusDays(28);
+                            while (moExp.getDayOfWeek().getValue() != 5) moExp = moExp.plusDays(1);
+
+                            // Order of expiries to try based on user preference
+                            List<LocalDate> expiriesToTry;
+                            if ("monthly".equals(expiryPref)) {
+                                expiriesToTry = List.of(moExp, bwExp, wkExp);
+                            } else if ("biweekly".equals(expiryPref) || "2week".equals(expiryPref) || "2 week".equals(expiryPref)) {
+                                expiriesToTry = List.of(bwExp, wkExp, moExp);
+                            } else {
+                                // Default: weekly first for all tickers; fallback biweekly → monthly
+                                expiriesToTry = List.of(wkExp, bwExp, moExp);
+                            }
+
+                            // Try each expiry until one hits ≥1%/week
+                            LocalDate chosenExp = null;
+                            double putPremium = 0, weeklyReturn_final = 0;
+                            String expiryLabel = "weekly";
+                            for (LocalDate exp : expiriesToTry) {
+                                long days = today.until(exp, java.time.temporal.ChronoUnit.DAYS);
+                                double weeks = days / 7.0;
+                                double premium = Math.round(putStrike * iv * Math.sqrt(days / 365.0) * 0.30 * 100.0) / 100.0;
+                                double wkReturn = (premium * 100.0) / capital / weeks * 100.0;
+                                if (wkReturn >= 1.0) {
+                                    chosenExp = exp;
+                                    putPremium = premium;
+                                    weeklyReturn_final = wkReturn;
+                                    long expDays = today.until(exp, java.time.temporal.ChronoUnit.DAYS);
+                                    expiryLabel = expDays <= 10 ? "weekly" : expDays <= 21 ? "2-week" : "monthly";
+                                    break;
+                                }
+                            }
+                            if (chosenExp == null) return null; // no expiry hits 1%/week
+
+                            long chosenDays = today.until(chosenExp, java.time.temporal.ChronoUnit.DAYS);
+                            double chosenWeeks = chosenDays / 7.0;
+                            double totalReturn = weeklyReturn_final * chosenWeeks;
+                            String totalSuffix = "weekly".equals(expiryLabel) ? "weekly" : expiryLabel + " · total ~" + String.format("%.1f", totalReturn) + "%";
+                            String bestExpiry = chosenExp.format(DateTimeFormatter.ofPattern("MMM dd, yyyy")) + " (" + totalSuffix + ")";
+
+                            // Covered call strike: 5% above current price
+                            double callStrikeVal = Math.round(price * 1.05 * 2.0) / 2.0;
+                            double callPremium = Math.round(putPremium * 0.6 * 100.0) / 100.0;
+
+                            boolean isEtf = sym.equals("TSLL") || sym.equals("NVDL") || sym.equals("AAPU")
+                                    || sym.equals("METU") || sym.equals("AMZU") || sym.equals("MSFU")
+                                    || sym.equals("CONL") || sym.equals("MSTU") || sym.equals("TQQQ")
+                                    || sym.equals("SPXL") || sym.equals("SOXL") || sym.equals("LABU")
+                                    || sym.equals("FNGU") || sym.equals("TECL") || sym.equals("WEBL") || sym.equals("DPST");
+
+                            return new WheelCandidate(sym, price, iv * 100, putStrike, putPremium,
+                                    weeklyReturn_final, bestExpiry, volume,
+                                    String.format("%.2f", callStrikeVal), callPremium, isEtf);
+                        } catch (Exception e) {
+                            return null;
+                        }
+                    }));
+                }
+
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+                List<WheelCandidate> candidates = new ArrayList<>();
+                for (CompletableFuture<WheelCandidate> f : futures) {
+                    WheelCandidate c = f.join();
+                    if (c != null) candidates.add(c);
+                }
+
+                // Sort by weekly return % descending
+                candidates.sort((a, b) -> Double.compare(b.weeklyReturnPct(), a.weeklyReturnPct()));
+                List<WheelCandidate> top5 = candidates.subList(0, Math.min(5, candidates.size()));
+
+                if (top5.isEmpty()) return "{\"error\":\"No wheel candidates found matching criteria.\"}";
+
+                StringBuilder sb = new StringBuilder("[");
+                for (int i = 0; i < top5.size(); i++) {
+                    WheelCandidate c = top5.get(i);
+                    if (i > 0) sb.append(",");
+                    sb.append(String.format(
+                        "{\"ticker\":\"%s\",\"price\":%.2f,\"iv\":%.1f,\"put_strike\":%.2f," +
+                        "\"put_premium\":%.2f,\"total_premium_per_contract\":%.0f," +
+                        "\"weekly_return_pct\":%.2f,\"expiry\":\"%s\",\"volume\":%d," +
+                        "\"call_strike\":\"%s\",\"call_premium\":%.2f,\"is_etf\":%b}",
+                        c.ticker(), c.price(), c.iv(), c.putStrike(), c.putPremium(),
+                        c.putPremium() * 100, c.weeklyReturnPct(), c.expiryDate(),
+                        c.volume(), c.callStrike(), c.callPremium(), c.isEtf()));
+                }
+                sb.append("]");
+
+                return String.format("{\"status\":\"success\",\"scan_date\":\"%s\",\"wheel_candidates\":%s}",
+                        today, sb);
+
+            } catch (Exception e) {
+                log.error("[WHEEL] scan failed", e);
+                return "{\"error\":\"Wheel scan failed.\"}";
             }
         };
     }
