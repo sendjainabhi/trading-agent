@@ -205,42 +205,34 @@ public class TradingAgentService {
                     - Change %: #28a745 if starts with "+" else #dc3545
                     BOLD RULE: <b> on (1) ticker, (2) section headers, (3) verdict text, (4) trade price labels only.
 
-                    <b style="color:[price color]">[SYMBOL] ($[current_price])</b>  |  [Short plain-English setup label]
-                    Checked: [time h:mm AM/PM z]  |  Trend: <span style="color:[#28a745 if ema_crossover_status Bullish/Bullish Cross, #dc3545 if Bearish/Bearish Cross, #ffc107 if Neutral]">[translate ema_crossover_status Rule A]</span>  |  Momentum: [calculated_rsi_14d] — [RSI label Rule A]  |  Signal: [buy_score]↑ [sell_score]↓
-                    What to do: <b style="color:[verdict color]">[Rule C]</b> — [One sentence explaining why]
-                    <b>[MARKET REGIME]</b>  |  [market_regime]  |  [regime_note][if earnings_flag is true: " · ⚠️ Earnings report in [earnings_days_away] day(s) ([earnings_date]) — stock can move wildly, be careful with options"]
-                    <b>[LIVE SNAPSHOT]</b>  |  [session_status]  |  [Rule B]  |  VWAP: $[intraday_vwap]  |  Vol: [volume]
-                    Range: $[micro_support]–$[micro_resistance]  |  Change: <span style="color:[change color]">[percent_change]</span>  |  What to watch: [One action sentence]
-                    <b>[KEY LEVELS]</b>  |  Prior Day: High <b>$[prior_day_high]</b> · Low <b>$[prior_day_low]</b>  |  VWAP Bands: <b>$[vwap_lower_1sd]</b>–<b>$[vwap_upper_1sd]</b>  |  ADX: [adx_value 1dp] ([adx_trend][if adx_trend = "Choppy": " — avoid breakout trades"])
-                    <b>[PRICE TARGETS]</b> (based on [implied_volatility] expected move)
-                    Tomorrow: $[tomorrow_lower]–$[tomorrow_upper]  |  Next week: $[next_week_lower]–$[next_week_upper][if custom requested:  |  [Window]: $[custom_lower]–$[custom_upper]]
-                    <b>[TREND]</b>
-                    Daily: <span style="color:[daily color]">[Up ↑/Down ↓/Sideways →]</span>  |  1h: <span style="color:[1h color]">[Rising ↑/Falling ↓/Flat →]</span>  |  15m: <span style="color:[15m color]">[Pushing Up ↑/Pushing Down ↓/Flat →]</span>  |  5m: <span style="color:[5m color]">[Moving Up ↑/Moving Down ↓/Flat →]</span>
-                    <b>[BUY OR SELL?]</b>  |  [Rule D]  |  ↑ Buy: [buy_score]/6  |  ↓ Sell: [sell_score]/6
-                    ↑ Buy case ([buy_score]/6): [active_buy_signals]
-                    ↓ Sell case ([sell_score]/6): [active_sell_signals]
-                    <b>[SMART MONEY]</b>  |  [Rule E]  |  Insider MSPR: [insider_mspr 2dp]  |  Analysts: [analyst_buy] Buy · [analyst_hold] Hold · [analyst_sell] Sell
-                    [if smart_money_conflict true:] ⚠️ Smart money and chart signals conflict — wait for alignment before committing full position.
-                    [if false + ACCUMULATING:] ✅ Institutions and technicals agree — buy signal confirmed by big money.
-                    [if false + DISTRIBUTING:] ✅ Institutions and technicals agree — sell signal confirmed by big money.
-                    [if false + NEUTRAL:] Smart money is on the sidelines — rely on technicals.
-                    <b>[WHAT TO DO]</b>
+                    OUTPUT FORMAT — render exactly in this order, no extra sections, no repeated data:
+
+                    <b style="color:[price color]">[SYMBOL] ($[current_price])</b>  |  [Rule D emoji+text] ([sell_score]/6 ↓ · [buy_score]/6 ↑)  |  [regime_note]  |  [session_status]  |  <span style="color:[change color]">[percent_change]</span>[if earnings_flag is true: "  |  ⚠️ Earnings in [earnings_days_away]d ([earnings_date])"]
+                    Trend: Daily <span style="color:[daily color]">[↑/↓/→]</span> · 1h <span style="color:[1h color]">[↑/↓/→]</span> · 15m <span style="color:[15m color]">[↑/↓/→]</span> · 5m <span style="color:[5m color]">[↑/↓/→]</span>  |  RSI [calculated_rsi_14d] ([RSI label Rule A])  |  Why: [active_sell_signals if sell > buy, else active_buy_signals — one compact sentence]
+                    VWAP $[intraday_vwap]  |  Vol [volume]  |  Range $[micro_support]–$[micro_resistance]  |  ADX [adx_value 1dp] ([adx_trend][if adx_trend Choppy/No Clear Trend: " ⚠️"])
+                    Key Levels: PDH <b>$[prior_day_high]</b>  ·  PDL <b>$[prior_day_low]</b>
+                    Price Targets (IV [implied_volatility]): Tomorrow $[tomorrow_lower]–$[tomorrow_upper]  ·  Next week $[next_week_lower]–$[next_week_upper]  ·  15-day $[custom_lower]–$[custom_upper]
+                    Watch: [One concise action sentence about key break levels]
+                    Smart Money: [Rule E]  |  Insider MSPR [insider_mspr 2dp] ([if > 20: "insiders buying" | if < -20: "insiders selling" | else: "neutral"])  |  Analysts [analyst_buy] Buy · [analyst_hold] Hold · [analyst_sell] Sell[if smart_money_conflict: "  ⚠️ Conflicts with chart signal"][if false+ACCUMULATING: "  ✅ Agrees with chart"][if false+DISTRIBUTING: "  ✅ Agrees with chart"][if false+NEUTRAL: "  — rely on technicals"]
+
+                    <b>WHAT TO DO</b>
                     [Output ONLY the matching block — never print the condition label:]
                     [If total_confluence_score > +15:]
-                    <b style="color:#28a745">📈 Strong Buy</b> · <i>[strategy_name]</i> — upside bet, you pay a fixed fee upfront, that's your max loss.
+                    <b style="color:#28a745">📈 Strong Buy</b> · <i>[strategy_name]</i> — upside bet, fixed cost upfront, that's your max loss
                     <b>Entry:</b> $[final_entry]  |  <b>Target Profit:</b> $[final_tp]  |  <b>Stop Loss:</b> $[final_sl]
                     Risk $[final_entry−final_sl, 2dp] · Potential gain $[final_tp−final_entry, 2dp]
                     Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
+                    [options_line]
                     [If total_confluence_score < −15:]
-                    <b style="color:#dc3545">📉 Strong Sell</b> · <i>[strategy_name]</i> — downside bet, you pay a fixed fee upfront, that's your max loss.
+                    <b style="color:#dc3545">📉 Strong Sell</b> · <i>[strategy_name]</i> — downside bet, fixed cost upfront, that's your max loss
                     <b>Entry:</b> $[final_entry]  |  <b>Target Profit:</b> $[final_tp]  |  <b>Stop Loss:</b> $[final_sl]
                     Risk $[final_sl−final_entry, 2dp] · Potential gain $[final_entry−final_tp, 2dp]
                     Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
+                    [options_line]
                     [If between −15 and +15:]
-                    <b style="color:#ffc107">⏳ No Clear Signal Yet</b> · <i>[strategy_name]</i>
-                    Watch: breaks above $[micro_resistance] → consider buying  |  drops below $[micro_support] → consider selling  |  Stop Loss: $[final_sl]
+                    <b style="color:#ffc107">⏳ No Clear Signal</b> · <i>[strategy_name]</i> — wait for a break
+                    Watch: above $[micro_resistance] → consider buying  ·  below $[micro_support] → consider selling  ·  Stop $[final_sl]
                     Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
-                    <b>Options play:</b> [options_line]
                     """;
 
     // ── Wheel strategy template ───────────────────────────────────────────────

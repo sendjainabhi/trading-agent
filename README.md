@@ -94,17 +94,34 @@ http://localhost:9090
 
 ## 📐 Trade Plan Format
 
-Each stock analysis returns:
+Each stock analysis returns a concise, non-repetitive output:
 
 ```
-[MARKET REGIME]  |  Bull / Bear / Neutral  |  ✅ Normal conditions
+GOOGL ($347.69)  |  🔴 Strong Sell (5/6 ↓ · 1/6 ↑)  |  ✅ Normal  |  Post-Market  |  -5.26%
+Trend: Daily ↓ · 1h ↓ · 15m → · 5m ↓  |  RSI 36.1 (weak)  |  Why: below 20-day avg, MACD falling, vol confirms
+VWAP $348.00  |  Vol 52,036,611  |  Range $341.72–$358.92  |  ADX 20.0 (No Clear Trend ⚠️)
+Key Levels: PDH $369.46  ·  PDL $358.74
+Price Targets (IV 33.74%): Tomorrow $342–$355  ·  Next week $335–$363  ·  15-day $324–$373
+Watch: breaks below $341.72 → deeper downside  ·  bounces above $358.92 → short-cover possible
+Smart Money: 🐋 Institutions Buying  |  Insider MSPR 21.10 (insiders buying)  |  Analysts 61 Buy · 9 Hold  ⚠️ Conflicts with chart signal
 
-[WHAT TO DO]
-📈 Strong Buy · Bull Call Debit Spread
-Entry: $X  |  Target Profit: $Y  |  Stop Loss: $Z
-Risk $R · Potential gain $G
-Qty: ~N shares  or  ~M contract(s) (exp. YYYY-MM-DD)
+WHAT TO DO
+📉 Bear Put Debit Spread — downside bet, fixed cost upfront, that's your max loss
+Entry $354.47  |  Target Profit $319.81  |  Stop Loss $373.72
+Risk $19.25 · Potential gain $34.66
+Qty: ~10 shares or ~1 contract (exp. July 17, 2026)
+Buy 1× $355.00 Put · Sell 1× $347.50 Put · Expires July 17, 2026
 ```
+
+**What each line means:**
+- Line 1 — ticker, signal score, market regime, session, % change
+- Line 2 — all timeframe trends + RSI + reason for signal in one line
+- Line 3 — live price context (VWAP, volume, range, ADX)
+- Line 4 — PDH / PDL key levels only
+- Line 5 — IV-based price prediction for tomorrow, next week, 15-day
+- Line 6 — key levels to watch for breakout/breakdown
+- Line 7 — smart money: institution flow, insider MSPR (buy/sell ratio), analyst consensus
+- WHAT TO DO — the trade: strategy, entry/target/stop, risk/gain, qty, options play
 
 ---
 
