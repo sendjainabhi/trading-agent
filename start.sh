@@ -136,7 +136,7 @@ echo "✅ Spring Boot is up on port $PORT."
 # ── Step 7: Start Cloudflare Tunnel ──────────────────────────────────────────
 echo ""
 echo "☁️  Step 7: Starting tunnel $TUNNEL_NAME → https://$DOMAIN ..."
-cloudflared tunnel --config "$CONFIG_FILE" run "$TUNNEL_NAME" > "$TUNNEL_LOG" 2>&1 &
+cloudflared tunnel --protocol http2 --config "$CONFIG_FILE" run "$TUNNEL_NAME" > "$TUNNEL_LOG" 2>&1 &
 TUNNEL_PID=$!
 
 sleep 4
