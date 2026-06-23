@@ -62,7 +62,15 @@ public class TradingAgentService {
             "SCAN", "SHOW", "SELL", "FIND", "GIVE", "LAST", "LIVE", "JUST",
             "WHAT", "WHEN", "WITH", "MOST", "BEST", "FROM", "HIGH", "LOW",
             "HOT", "NEW", "PRE", "POST", "MORE", "LESS", "ALSO", "OPEN",
-            "YTD", "MTD", "QTD"
+            "YTD", "MTD", "QTD",
+            // query context words falsely matched as tickers
+            "TODAY", "WEEK", "MONTH", "YEAR", "DAYS", "NEXT", "OVER", "PAST",
+            "PLAY", "PLAYS", "PICK", "PICKS", "MOVE", "MOVES", "MOVER", "MOVERS",
+            "BULL", "BEAR", "GAIN", "LOSS", "FALL", "RISE", "DROP", "JUMP",
+            "SOON", "THEN", "THEM", "THEY", "THIS", "THAT", "WILL",
+            "WATCH", "LIST", "IDEA", "IDEAS", "TRADE", "TRADES", "STOCK", "STOCKS",
+            "CALL", "PUTS", "LONG", "SHORT", "MARKET", "OPTION", "OPTIONS",
+            "SWING", "RANGE", "SETUP", "SETUPS", "LEVEL", "LEVELS"
     );
 
     // Well-known company names → ticker (handles natural language like "analyze Tesla")
@@ -148,7 +156,7 @@ public class TradingAgentService {
                     You are 'AlphaQuant', a friendly trading assistant. Explain everything like you are a knowledgeable friend helping someone understand the markets — no jargon, no acronyms unless you immediately explain them in plain words right after.
 
                     MANDATORY TOOL CALLING RULE:
-                    You MUST call 'stockPriceFunction' for specific ticker inquiries — it returns all technical data including trend, RSI, EMA crossover, and trade setup in one call. You MUST call 'generalMarketScannerFunction' for broad scans, top options, or trending lists. You MUST call 'preMarketScannerFunction' for pre-market queries. You MUST call 'wheelStrategyScannerFunction' when the user says 'wheel', 'wheel strategy', 'wheel scan', 'wheel picks', 'CSP', or 'sell puts for income' — never use generalMarketScannerFunction for wheel requests. Never invent data. Never call a second function for more data on the same ticker.
+                    You MUST call 'stockPriceFunction' for specific ticker inquiries — it returns all technical data including trend, RSI, EMA crossover, and trade setup in one call. You MUST call 'generalMarketScannerFunction' for broad scans, top options, or trending lists. You MUST call 'bearishScannerFunction' when the user asks for bearish movers, biggest losers, stocks falling, or downside plays. You MUST call 'bullishScannerFunction' when the user asks for bullish movers, biggest gainers, stocks rising, or upside plays. You MUST call 'swingScannerFunction' when the user asks for swing trades, swing scan, swing plays, range-bound stocks, consolidating stocks, or stocks near support/resistance — it detects real swing highs/lows from daily bars and requires volume > 500K. You MUST call 'preMarketScannerFunction' for pre-market queries. You MUST call 'wheelStrategyScannerFunction' when the user says 'wheel', 'wheel strategy', 'wheel scan', 'wheel picks', 'CSP', or 'sell puts for income' — never use generalMarketScannerFunction for wheel requests. Never invent data. Never call a second function for more data on the same ticker.
 
                     PLAIN LANGUAGE TRANSLATION RULES — apply these everywhere, every time:
                     A. INDICATOR TRANSLATION:
@@ -163,7 +171,7 @@ public class TradingAgentService {
                     B. SIGNAL STRENGTH (total_confluence_score, range -100 to +100):
                        - above +60  → "Very Strong Buy Signal ([score])"
                        - +15 to +60 → "Moderate Buy Signal ([score])"
-                       - -15 to +15 → "No Clear Direction ([score])"
+                       - -15 to +15 → "Hold & Wait ([score])"
                        - -60 to -15 → "Moderate Sell Signal ([score])"
                        - below -60  → "Very Strong Sell Signal ([score])"
                     C. VERDICT TRANSLATION (automated_trade_verdict — use strategy_name field instead, NEVER show raw tag):
@@ -208,31 +216,69 @@ public class TradingAgentService {
                     OUTPUT FORMAT — render exactly in this order, no extra sections, no repeated data:
 
                     <b style="color:[price color]">[SYMBOL] ($[current_price])</b>  |  [Rule D emoji+text] ([sell_score]/6 ↓ · [buy_score]/6 ↑)  |  [regime_note]  |  [session_status]  |  <span style="color:[change color]">[percent_change]</span>[if earnings_flag is true: "  |  ⚠️ Earnings in [earnings_days_away]d ([earnings_date])"]
-                    Trend: Daily <span style="color:[daily color]">[↑/↓/→]</span> · 1h <span style="color:[1h color]">[↑/↓/→]</span> · 15m <span style="color:[15m color]">[↑/↓/→]</span> · 5m <span style="color:[5m color]">[↑/↓/→]</span>  |  RSI [calculated_rsi_14d] ([RSI label Rule A])  |  Why: [active_sell_signals if sell > buy, else active_buy_signals — one compact sentence]
-                    VWAP $[intraday_vwap]  |  Vol [volume]  |  Range $[micro_support]–$[micro_resistance]  |  ADX [adx_value 1dp] ([adx_trend][if adx_trend Choppy/No Clear Trend: " ⚠️"])
-                    Key Levels: PDH <b>$[prior_day_high]</b>  ·  PDL <b>$[prior_day_low]</b>
-                    Price Targets (IV [implied_volatility]): Tomorrow $[tomorrow_lower]–$[tomorrow_upper]  ·  Next week $[next_week_lower]–$[next_week_upper]  ·  15-day $[custom_lower]–$[custom_upper]
-                    Watch: [One concise action sentence about key break levels]
-                    Smart Money: [Rule E]  |  Insider MSPR [insider_mspr 2dp] ([if > 20: "insiders buying" | if < -20: "insiders selling" | else: "neutral"])  |  Analysts [analyst_buy] Buy · [analyst_hold] Hold · [analyst_sell] Sell[if smart_money_conflict: "  ⚠️ Conflicts with chart signal"][if false+ACCUMULATING: "  ✅ Agrees with chart"][if false+DISTRIBUTING: "  ✅ Agrees with chart"][if false+NEUTRAL: "  — rely on technicals"]
+                    <b>Trend:</b> Daily <span style="color:[daily color]">[↑/↓/→]</span> · 1h <span style="color:[1h color]">[↑/↓/→]</span> · 15m <span style="color:[15m color]">[↑/↓/→]</span> · 5m <span style="color:[5m color]">[↑/↓/→]</span>  |  RSI [calculated_rsi_14d] ([RSI label Rule A])  |  Why: [active_sell_signals if sell > buy, else active_buy_signals — one compact sentence]
+                    <b>VWAP</b> $[intraday_vwap]  |  <b>Vol</b> [volume]  |  <b>Range</b> $[micro_support]–$[micro_resistance]  |  <b>ADX</b> [adx_value 1dp] ([adx_trend][if adx_trend Choppy/No Clear Trend: " ⚠️"])
+                    <b>Key Levels:</b> PDH <b>$[prior_day_high]</b>  ·  PDL <b>$[prior_day_low]</b>[if swing_support > 0: "  |  <b>Swing Support:</b> <b style='color:#28a745'>$[swing_support]</b> ([swing_support_strength]× tested)"][if swing_resistance > 0: "  ·  <b>Swing Resistance:</b> <b style='color:#dc3545'>$[swing_resistance]</b> ([swing_resistance_strength]× tested)"]
+                    <b>Price Targets</b> (IV [implied_volatility]): Tomorrow $[tomorrow_lower]–$[tomorrow_upper]  ·  Next week $[next_week_lower]–$[next_week_upper]  ·  [if custom_days > 0: "[custom_days]-day" else "15-day"] $[custom_lower]–$[custom_upper]
+                    <b>Watch:</b> [One concise action sentence about key break levels]
+                    <b>Smart Money:</b> [Rule E]  |  Insider MSPR <b>[insider_mspr 2dp]</b> ([if > 20: "<span style='color:#28a745'>insiders buying</span>" | if < -20: "<span style='color:#dc3545'>insiders selling</span>" | else: "neutral"])  |  Analysts <b style="color:#28a745">[analyst_buy] Buy</b> · [analyst_hold] Hold · <b style="color:#dc3545">[analyst_sell] Sell</b>[if smart_money_conflict: "  ⚠️ Conflicts with chart signal"][if false+ACCUMULATING: "  <span style='color:#28a745'>✅ Agrees with chart</span>"][if false+DISTRIBUTING: "  <span style='color:#28a745'>✅ Agrees with chart</span>"][if false+NEUTRAL: "  — rely on technicals"]
 
-                    <b>WHAT TO DO</b>
                     [Output ONLY the matching block — never print the condition label:]
                     [If total_confluence_score > +15:]
-                    <b style="color:#28a745">📈 Strong Buy</b> · <i>[strategy_name]</i> — upside bet, fixed cost upfront, that's your max loss
-                    <b>Entry:</b> $[final_entry]  |  <b>Target Profit:</b> $[final_tp]  |  <b>Stop Loss:</b> $[final_sl]
-                    Risk $[final_entry−final_sl, 2dp] · Potential gain $[final_tp−final_entry, 2dp]
+                    <div class="trade-card buy">
+                    <b style="color:#28a745">📈 WHAT TO DO — Strong Buy</b> · <i>[strategy_name]</i> — upside bet, fixed cost upfront, that's your max loss
+                    <b>Entry:</b> <b>$[final_entry]</b>  |  <b style="color:#28a745">Target Profit:</b> <b style="color:#28a745">$[final_tp]</b>  |  <b style="color:#dc3545">Stop Loss:</b> <b style="color:#dc3545">$[final_sl]</b>
+                    <span style="color:#dc3545">Risk $[final_entry−final_sl, 2dp]</span> · <span style="color:#28a745">Potential gain $[final_tp−final_entry, 2dp]</span>
                     Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
                     [options_line]
+                    </div>
                     [If total_confluence_score < −15:]
-                    <b style="color:#dc3545">📉 Strong Sell</b> · <i>[strategy_name]</i> — downside bet, fixed cost upfront, that's your max loss
-                    <b>Entry:</b> $[final_entry]  |  <b>Target Profit:</b> $[final_tp]  |  <b>Stop Loss:</b> $[final_sl]
-                    Risk $[final_sl−final_entry, 2dp] · Potential gain $[final_entry−final_tp, 2dp]
+                    <div class="trade-card sell">
+                    <b style="color:#dc3545">📉 WHAT TO DO — Strong Sell</b> · <i>[strategy_name]</i> — downside bet, fixed cost upfront, that's your max loss
+                    <b>Entry:</b> <b>$[final_entry]</b>  |  <b style="color:#28a745">Target Profit:</b> <b style="color:#28a745">$[final_tp]</b>  |  <b style="color:#dc3545">Stop Loss:</b> <b style="color:#dc3545">$[final_sl]</b>
+                    <span style="color:#dc3545">Risk $[final_sl−final_entry, 2dp]</span> · <span style="color:#28a745">Potential gain $[final_entry−final_tp, 2dp]</span>
                     Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
                     [options_line]
+                    </div>
+                    [if swing_trade_signal is SWING_LONG:]
+                    <div class="trade-card swing-long">
+                    <b style="color:#28a745">🔄 SWING TRADE — Near Support, Long Opportunity</b>
+                    [swing_note]
+                    <b>Strategy:</b> <i>[swing_strategy]</i>  |  Holding: days to weeks
+                    <b>Entry:</b> <b>$[swing_entry]</b>  |  <b style="color:#28a745">Target:</b> <b style="color:#28a745">$[swing_target]</b>  |  <b style="color:#dc3545">Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>
+                    Support tested <b>[swing_support_strength]×</b> — stronger the more times it held
+                    </div>
+                    [if swing_trade_signal is SWING_SHORT:]
+                    <div class="trade-card swing-short">
+                    <b style="color:#dc3545">🔄 SWING TRADE — Near Resistance, Short Opportunity</b>
+                    [swing_note]
+                    <b>Strategy:</b> <i>[swing_strategy]</i>  |  Holding: days to weeks
+                    <b>Entry:</b> <b>$[swing_entry]</b>  |  <b style="color:#28a745">Target:</b> <b style="color:#28a745">$[swing_target]</b>  |  <b style="color:#dc3545">Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>
+                    Resistance tested <b>[swing_resistance_strength]×</b> — stronger the more times it rejected
+                    </div>
+                    [if swing_trade_signal is RANGE_PLAY:]
+                    <div class="trade-card swing-range">
+                    <b style="color:#ffc107">🔄 RANGE PLAY — Stock Stuck Between Two Levels</b>
+                    [swing_note]
+                    <b>Strategy:</b> <i>[swing_strategy]</i> — collect premium from both sides
+                    <b>Sell Put at:</b> <b style="color:#28a745">$[swing_support]</b>  ·  <b>Sell Call at:</b> <b style="color:#dc3545">$[swing_resistance]</b>
+                    Profit if price stays in range until expiry
+                    </div>
+
                     [If between −15 and +15:]
-                    <b style="color:#ffc107">⏳ No Clear Signal</b> · <i>[strategy_name]</i> — wait for a break
-                    Watch: above $[micro_resistance] → consider buying  ·  below $[micro_support] → consider selling  ·  Stop $[final_sl]
+                    <div class="trade-card hold">
+                    <b style="color:#ffc107">⏳ WHAT TO DO — Hold & Wait</b> — no clear signal yet, but here's what to do when price moves:
+
+                    <b style="color:#28a745">🟢 If price breaks above <b>$[micro_resistance]</b> → Buy</b>
+                    Strategy: <i>[bullish strategy_name]</i>
+                    <b>Entry:</b> <b>$[micro_resistance]</b>  |  <b style="color:#28a745">Target Profit:</b> <b style="color:#28a745">$[micro_resistance + (micro_resistance − final_sl), 2dp]</b>  |  <b style="color:#dc3545">Stop Loss:</b> <b style="color:#dc3545">$[final_sl]</b>
                     Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
+
+                    <b style="color:#dc3545">🔴 If price drops below <b>$[micro_support]</b> → Sell</b>
+                    Strategy: <i>[bearish strategy_name]</i>
+                    <b>Entry:</b> <b>$[micro_support]</b>  |  <b style="color:#28a745">Target Profit:</b> <b style="color:#28a745">$[micro_support − (final_sl − micro_support), 2dp]</b>  |  <b style="color:#dc3545">Stop Loss:</b> <b style="color:#dc3545">$[micro_resistance]</b>
+                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
+                    </div>
                     """;
 
     // ── Wheel strategy template ───────────────────────────────────────────────
@@ -264,19 +310,48 @@ public class TradingAgentService {
                     [One <tr> per wheel_candidate:]
                     <tr>
                       <td><b>[ticker]</b></td>
-                      <td>$[price]</td>
-                      <td>[if is_etf: "Leveraged ETF ⚠️" else "Stock"]</td>
+                      <td><b>$[price]</b></td>
+                      <td>[if is_etf: "<span style='color:#ffc107'>Leveraged ETF ⚠️</span>" else "Stock"]</td>
                       <td>[iv]%</td>
-                      <td>$[put_strike] ([pct_otm = (price−put_strike)/price×100, 1dp]% below price)</td>
-                      <td>~$[put_premium]/share = $[total_premium_per_contract] per contract</td>
-                      <td><b style="color:#28a745">[weekly_return_pct]%</b></td>
-                      <td>$[put_strike × 100, 0dp]</td>
+                      <td><b>$[put_strike]</b> ([pct_otm = (price−put_strike)/price×100, 1dp]% below price)</td>
+                      <td><b style="color:#28a745">~$[put_premium]/share = $[total_premium_per_contract] per contract</b></td>
+                      <td><b style="color:#28a745">[weekly_return_pct]%/wk</b></td>
+                      <td><b>$[put_strike × 100, 0dp]</b></td>
                       <td>[expiry]</td>
-                      <td>$[call_strike] strike · collect ~$[call_premium × 100, 0dp] per contract</td>
+                      <td><b>$[call_strike]</b> strike · collect ~<b style="color:#28a745">$[call_premium × 100, 0dp]</b> per contract</td>
                     </tr>
                     </table>
 
                     After the table, show one line: ⚠️ Leveraged ETF note: if assigned on any ETF, sell the covered call immediately and exit within 1–2 weeks — these decay over time.
+                    """;
+
+    // ── Swing scanner table — injected for swing/range queries ───────────────
+    private static final String SWING_SCANNER_TEMPLATE = """
+                    ── SWING SCANNER TABLE ──────────────────────────────────────────────────────
+                    (Use ONLY when payload contains swing_scan_results. Render all rows immediately.)
+
+                    <b>🔄 SWING TRADE SETUPS — Range-Bound & Near-Level Plays</b>
+                    High-volume stocks at key support/resistance levels. Each setup includes a specific options strategy.
+
+                    <table>
+                    <tr><th>Stock</th><th>Price</th><th>Chg%</th><th>Volume</th><th>ADX</th><th>Setup</th><th>Support</th><th>Resistance</th><th>Entry</th><th>Target</th><th>Stop</th><th>Strategy</th></tr>
+                    [One <tr> per swing_scan_results object:
+                    - Stock: <td><span style="color:[#17a2b8 if SWING_LONG, #6f42c1 if SWING_SHORT, #fd7e14 if RANGE_PLAY]"><b>[symbol]</b></span></td>
+                    - Price: <td>$[current_price]</td>
+                    - Chg%: <td><span style="color:[#28a745 if percent_change starts with +, else #dc3545]">[percent_change]</span></td>
+                    - Volume: <td>[volume]</td>
+                    - ADX: <td>[adx_value | 0dp] <i>([<20: "Ranging", 20-25: "Weak Trend", >25: "Trending"])</i></td>
+                    - Setup: <td><b>[swing_trade_signal mapped: SWING_LONG→<span style="color:#17a2b8">Near Support ↑</span>, SWING_SHORT→<span style="color:#6f42c1">Near Resistance ↓</span>, RANGE_PLAY→<span style="color:#fd7e14">Range Play ↔</span>]</b></td>
+                    - Support: <td><b style="color:#28a745">$[swing_support]</b></td>
+                    - Resistance: <td><b style="color:#dc3545">$[swing_resistance]</b></td>
+                    - Entry: <td><b>$[swing_entry]</b></td>
+                    - Target: <td><b style="color:#28a745">$[swing_target]</b></td>
+                    - Stop: <td><b style="color:#dc3545">$[swing_stop]</b></td>
+                    - Strategy: <td>[swing_strategy]</td>]
+                    </table>
+                    [swing_note for each row if available — one short sentence per stock on why the setup is valid]
+                    [1-2 plain English sentences on the strongest setup and overall market context. No jargon.]
+                    ---
                     """;
 
     // ── Market scanner table — injected only for scan queries (~3 KB) ────────
@@ -293,13 +368,13 @@ public class TradingAgentService {
                     - Price: <td>$[current_price]</td>
                     - Change: <td><span style="color:[#28a745/+ else #dc3545]">[percent_change]</span></td>
                     - Market Hours: <td>[session_status plain English]</td>
-                    - Direction: <td><span style="color:[#28a745/>15, #dc3545/<-15, #ffc107]">[Buy/>15 / Sell/<-15 / Wait]</span></td>
-                    - Signal: <td>[Rule B short form e.g. "Strong Buy (+72)"]</td>
-                    - Enter At: <td>$[final_entry]</td>
-                    - Target: <td>$[final_tp]</td>
-                    - Exit If: <td>$[final_sl]</td>
-                    - Call Strike: <td>$[strike_buy]</td>
-                    - Cover At: <td>$[strike_sell]</td>
+                    - Direction: <td><span style="color:[#28a745/>15, #dc3545/<-15, #ffc107]">[Buy/>15 / Sell/<-15 / Hold]</span></td>
+                    - Signal: <td><span style="color:[#28a745 if total_confluence_score>0 else #dc3545]"><b>[Rule B short form e.g. "Strong Buy (+72)"]</b></span></td>
+                    - Enter At: <td><b>$[final_entry]</b></td>
+                    - Target: <td><b style="color:#28a745">$[final_tp]</b></td>
+                    - Exit If: <td><b style="color:#dc3545">$[final_sl]</b></td>
+                    - Call Strike: <td><b>$[strike_buy]</b></td>
+                    - Cover At: <td><b>$[strike_sell]</b></td>
                     - Expires: <td>[target_expiration]</td>]
                     </table>
                     [1-2 plain English sentences on overall market mood. No jargon.]
@@ -321,13 +396,13 @@ public class TradingAgentService {
                     - Early Move: <td><span style="color:[#28a745/+ else #dc3545]">[percent_change]</span></td>
                     - Early Volume: <td>[pre_market_volume]</td>
                     - What It's Doing: <td><i>[pattern plain English: "Gap & Go (Bullish)"→"Opened higher and keeps climbing", "Gap & Go (Bearish)"→"Opened lower and keeps falling", "Gap & Fade (Selling Pressure)"→"Opened higher but sellers pushing back down", "Gap & Fade (Buying Interest)"→"Opened lower but buyers stepping in", "Consolidating at Gap"→"Holding gap level", "Gap Up (Mixed)"→"Opened higher, direction unclear", "Gap Down (Mixed)"→"Opened lower, direction unclear", "Flat Drift"→"Barely moved overnight"]</i></td>
-                    - Direction: <td><span style="color:[#28a745/>15, #dc3545/<-15, #ffc107]">[Buy/Sell/Wait]</span></td>
-                    - Signal: <td>[Rule B short form]</td>
-                    - Enter At: <td>$[final_entry]</td>
-                    - Target: <td>$[final_tp]</td>
-                    - Exit If: <td>$[final_sl]</td>
-                    - Call Strike: <td>$[strike_buy]</td>
-                    - Cover At: <td>$[strike_sell]</td>
+                    - Direction: <td><span style="color:[#28a745/>15, #dc3545/<-15, #ffc107]">[Buy/Sell/Hold]</span></td>
+                    - Signal: <td><span style="color:[#28a745 if total_confluence_score>0 else #dc3545]"><b>[Rule B short form]</b></span></td>
+                    - Enter At: <td><b>$[final_entry]</b></td>
+                    - Target: <td><b style="color:#28a745">$[final_tp]</b></td>
+                    - Exit If: <td><b style="color:#dc3545">$[final_sl]</b></td>
+                    - Call Strike: <td><b>$[strike_buy]</b></td>
+                    - Cover At: <td><b>$[strike_sell]</b></td>
                     - Expires: <td>[target_expiration]</td>]
                     </table>
                     [2-3 plain English sentences: overall pre-market mood, strongest setup, best stock for the open. No jargon.]
@@ -336,8 +411,8 @@ public class TradingAgentService {
 
     public TradingAgentService(ChatClient.Builder chatClientBuilder) {
         this.ollamaClientBuilder = chatClientBuilder
-                .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE + WHEEL_TEMPLATE)
-                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction", "wheelStrategyScannerFunction")
+                .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE + WHEEL_TEMPLATE + SWING_SCANNER_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "bearishScannerFunction", "bullishScannerFunction", "swingScannerFunction", "preMarketScannerFunction", "wheelStrategyScannerFunction")
                 .defaultAdvisors(new SimpleLoggerAdvisor());
     }
 
@@ -494,8 +569,8 @@ public class TradingAgentService {
     // ── Provider initialisation helpers ──────────────────────────────────────
 
     private ChatClient wrapWithDefaults(ChatClient.Builder b) {
-        return b.defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE + WHEEL_TEMPLATE)
-                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "preMarketScannerFunction", "wheelStrategyScannerFunction")
+        return b.defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE + WHEEL_TEMPLATE + SWING_SCANNER_TEMPLATE)
+                .defaultToolNames("stockPriceFunction", "generalMarketScannerFunction", "bearishScannerFunction", "bullishScannerFunction", "swingScannerFunction", "preMarketScannerFunction", "wheelStrategyScannerFunction")
                 .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
     }
@@ -723,7 +798,25 @@ public class TradingAgentService {
         // 2. Ticker extraction — happens after pre-market so stop-words filter runs cleanly
         String ticker = extractTicker(raw);
 
-        // 3. General scanner — wins when no specific ticker is present
+        // 3a. Bearish movers
+        if (ticker == null && lower.matches(".*\\b(bear|bearish|loser|losing|falling|drop|biggest.?down|downside|sell.?mover|short.?play|most.?bearish|worst.?performer|biggest.?fall|biggest.?loss).*")) {
+            log.info("[INTENT] bearishScanner");
+            return raw + "\n\n[Intent: Call bearishScannerFunction — user wants biggest bearish movers]";
+        }
+
+        // 3b. Bullish movers
+        if (ticker == null && lower.matches(".*\\b(bull|bullish|gainer|gaining|rising|biggest.?up|upside|buy.?mover|most.?bullish|best.?performer|biggest.?gain|biggest.?rise|biggest.?winner).*")) {
+            log.info("[INTENT] bullishScanner");
+            return raw + "\n\n[Intent: Call bullishScannerFunction — user wants biggest bullish movers]";
+        }
+
+        // 3c. Swing scanner — range-bound setups and stocks near swing support/resistance
+        if (ticker == null && lower.matches(".*\\b(swing|swing.?trade|swing.?scan|swing.?play|swing.?pick|swing.?setup|consolidat|range.?play|range.?bound|range.?stock|near.?support|near.?resistance|at.?support|at.?resistance|ranging|channel.?play|price.?range).*")) {
+            log.info("[INTENT] swingScanner");
+            return raw + "\n\n[Intent: Call swingScannerFunction — user wants swing trade setups at key levels]";
+        }
+
+        // 3d. General scanner — wins when no specific ticker is present
         if (ticker == null && lower.matches(".*\\b(scan|scanner|market.?mover|most.?active|trending|top.?pick|hot.?stock|broad.?scan|watch.?list|top.?option|what.*trade|what.*buy|what.*play|what.*watch|movers?.?today|what.*moving).*")) {
             log.info("[INTENT] generalMarketScanner");
             return raw + "\n\n[Intent: Call generalMarketScannerFunction — user wants a broad market scan]";

@@ -411,18 +411,21 @@ async function dispatchCommand() {
         const reader  = response.body.getReader();
         const decoder = new TextDecoder();
         let finalOutputString = '';
-        let renderPending     = false;
         let processActive     = true;
         let streamComplete    = false;
+        let renderTimer       = null;
 
-        const renderFrame = () => {
-            if (streamComplete) { renderPending = false; return; }
-            if (finalOutputString.trim()) {
-                agentMsg.innerHTML = sanitizeLlmOutput(marked.parse(finalOutputString));
-                wrapTables(agentMsg);
-            }
-            chatWindow.scrollTop = chatWindow.scrollHeight;
-            renderPending = false;
+        const scheduleRender = () => {
+            if (renderTimer) return;
+            renderTimer = setTimeout(() => {
+                renderTimer = null;
+                if (streamComplete) return;
+                if (finalOutputString.trim()) {
+                    agentMsg.innerHTML = sanitizeLlmOutput(marked.parse(finalOutputString));
+                    wrapTables(agentMsg);
+                    chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
+            }, 250);
         };
 
         while (processActive) {
@@ -435,7 +438,7 @@ async function dispatchCommand() {
                 continue;
             }
             finalOutputString += chunk;
-            if (!renderPending) { renderPending = true; requestAnimationFrame(renderFrame); }
+            scheduleRender();
         }
 
         if (finalOutputString.trim()) {

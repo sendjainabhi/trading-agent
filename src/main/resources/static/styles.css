@@ -14,7 +14,7 @@
 
 body {
     background-color: var(--bg-page);
-    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     margin: 0;
     display: flex;
     justify-content: center;
@@ -68,14 +68,26 @@ header {
 
 .message {
     max-width: 100%;
-    padding: 14px 18px;
+    padding: 12px 16px;
     border-radius: 12px;
-    line-height: 1.6;
-    font-size: 0.95rem; 
+    line-height: 1.55;
+    font-size: 0.92rem;
+    font-weight: 400;
     animation: fadeIn 0.3s ease-in-out;
     white-space: pre-wrap;
     overflow-wrap: break-word;
     word-break: break-word;
+}
+
+.message.agent b {
+    font-weight: 700;
+    color: var(--accent-dark);
+    font-size: 0.94rem;
+    letter-spacing: 0.01em;
+}
+
+.message.agent b[style] {
+    color: unset;
 }
 
 @keyframes fadeIn {
@@ -106,6 +118,22 @@ header {
     margin-top: 6px;
     margin-bottom: 10px;
 }
+
+.trade-card {
+    margin-top: 12px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    border-left: 4px solid #ccc;
+    background-color: rgba(0,0,0,0.02);
+    font-size: 0.92rem;
+    line-height: 1.6;
+}
+.trade-card.buy        { border-left-color: #28a745; background-color: rgba(40,167,69,0.06); }
+.trade-card.sell       { border-left-color: #dc3545; background-color: rgba(220,53,69,0.06); }
+.trade-card.hold       { border-left-color: #ffc107; background-color: rgba(255,193,7,0.06); }
+.trade-card.swing-long  { border-left-color: #17a2b8; background-color: rgba(23,162,184,0.06); }
+.trade-card.swing-short { border-left-color: #6f42c1; background-color: rgba(111,66,193,0.06); }
+.trade-card.swing-range { border-left-color: #fd7e14; background-color: rgba(253,126,20,0.06); }
 
 .message.agent hr {
     margin: 12px 0;
