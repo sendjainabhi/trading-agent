@@ -11,6 +11,35 @@
 </head>
 <body>
 
+<div class="app-layout">
+
+<!-- ── Watchlist Sidebar ──────────────────────────────────────────────── -->
+<aside class="watchlist-sidebar" id="watchlistSidebar">
+    <div class="wl-header">
+        <span class="wl-title">⭐ Watchlist</span>
+        <span class="wl-count" id="wlCount">0/10</span>
+    </div>
+    <div class="wl-add-row">
+        <input type="text" id="wlInput" placeholder="Ticker or name…"
+               onkeydown="handleWlKeydown(event)"
+               oninput="handleWlInput(this.value)"
+               onblur="setTimeout(hideWlSuggestions,200)"
+               autocomplete="off">
+        <button class="wl-add-btn" onclick="addFavorite()" title="Add to watchlist">+</button>
+    </div>
+    <div id="wlList" class="wl-list"></div>
+    <div class="wl-footer">
+        <span class="wl-time" id="wlTime"></span>
+        <select class="wl-interval-sel" id="wlInterval" onchange="setWlInterval(this.value)">
+            <option value="0">Off</option>
+            <option value="30" selected>30s</option>
+            <option value="60">1m</option>
+            <option value="300">5m</option>
+        </select>
+        <button class="wl-refresh-btn" onclick="refreshWatchlist()" title="Refresh now">⟳</button>
+    </div>
+</aside>
+
 <div class="chat-container">
     <header>
         <div class="header-content">
@@ -23,6 +52,7 @@
                     <span class="conn-dot conn-dot-red" id="connDot"></span>
                     <span class="header-model-label" id="headerModelLabel">connecting…</span>
                 </div>
+                <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle dark / light mode">🌙</button>
                 <button class="settings-btn" onclick="openSettingsModal()" title="Model Settings">⚙</button>
             </div>
         </div>
@@ -56,7 +86,8 @@
         </div>
         <button id="sendButton" onclick="dispatchCommand()">Send</button>
     </div>
-</div>
+</div><!-- /chat-container -->
+</div><!-- /app-layout -->
 
 <!-- ── Settings Modal ──────────────────────────────────────────────────── -->
 <div id="settingsModal" class="modal-overlay" style="display:none"
@@ -76,6 +107,7 @@
                     <option value="ollama">🦙 Ollama (Local)</option>
                     <option value="openai">🤖 OpenAI</option>
                     <option value="anthropic">🧠 Anthropic</option>
+                    <option value="google">🔮 Google Gemini</option>
                 </select>
             </div>
             <div class="form-group">
@@ -84,7 +116,7 @@
                        placeholder="e.g. qwen3.6:35b, gpt-4o, claude-sonnet-4-6"
                        oninput="onModelInput(this.value)">
                 <div id="modelSuggestions" class="model-suggestions"></div>
-                <span class="field-hint">Ollama: qwen3.6:35b · OpenAI: gpt-4o, gpt-4o-mini · Anthropic: claude-sonnet-4-6 · Custom proxy: your-model-name</span>
+                <span class="field-hint">Ollama: qwen3.6:35b · OpenAI: gpt-4o, gpt-4o-mini · Anthropic: claude-sonnet-4-6 · Google: gemini-2.0-flash, gemini-2.5-pro · Custom proxy: your-model-name</span>
             </div>
             <div class="form-group">
                 <label for="sBaseUrl" id="sBaseUrlLabel">Endpoint URL</label>
@@ -125,6 +157,11 @@
         </div>
     </div>
 </div>
+
+<!-- Watchlist name tooltip -->
+<div id="wlTooltip" class="wl-tooltip" style="display:none"></div>
+<!-- Watchlist ticker search autocomplete -->
+<div id="wlSuggestions" class="wl-suggestions-popup" style="display:none"></div>
 
 <script src="app.js"></script>
 </body>

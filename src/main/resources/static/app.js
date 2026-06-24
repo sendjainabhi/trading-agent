@@ -20,10 +20,10 @@ const TICKER_STOP = new Set([
     'A','I','AM','AN','AT','BE','BY','DO','ETF','FOR','GO','HI','IF',
     'IN','IS','IT','ME','MY','NO','OF','OK','ON','OR','THE','TO','UP',
     'VS','AND','ARE','BIG','BUY','CAN','CEO','CFO','GET','HOT','HOW',
-    'IPO','NEW','NOW','OTC','ATH','ATL','PRE','ALL','TOP','SELL','SCAN',
+    'IPO','NEW','OTC','ATH','ATL','PRE','ALL','TOP','SELL','SCAN',
     'SHOW','WHAT','WHEN','WITH','MOST','BEST','FROM','GIVE','FIND','LAST',
     'LIVE','JUST','HIGH','LOW'
-]);
+]); // NOTE: 'NOW' removed — ServiceNow ticker
 
 const COMPANY_MAP = {
     'tesla':'TSLA','nvidia':'NVDA','apple':'AAPL','google':'GOOGL',
@@ -31,7 +31,8 @@ const COMPANY_MAP = {
     'facebook':'META','netflix':'NFLX','amd':'AMD','intel':'INTC',
     'broadcom':'AVGO','salesforce':'CRM','palantir':'PLTR',
     'coinbase':'COIN','shopify':'SHOP','snowflake':'SNOW',
-    'uber':'UBER','lyft':'LYFT','airbnb':'ABNB','spotify':'SPOT'
+    'uber':'UBER','lyft':'LYFT','airbnb':'ABNB','spotify':'SPOT',
+    'servicenow':'NOW','service now':'NOW'
 };
 
 // Extract every unique TICKER ($PRICE) pair from the AI's response text
@@ -478,7 +479,8 @@ const SETTINGS_TTL = 30 * 24 * 60 * 60 * 1000;
 const PROVIDER_DEFAULT_URLS = {
     ollama:    'http://127.0.0.1:11434',
     openai:    'https://api.openai.com',
-    anthropic: 'https://api.anthropic.com'
+    anthropic: 'https://api.anthropic.com',
+    google:    'https://generativelanguage.googleapis.com/v1beta/openai'
 };
 
 let modelSettings = {
@@ -609,12 +611,14 @@ function updateProviderFields() {
     const labelMap = {
         ollama:    'Ollama Server URL',
         openai:    'OpenAI Endpoint URL',
-        anthropic: 'Anthropic Endpoint URL'
+        anthropic: 'Anthropic Endpoint URL',
+        google:    'Google AI Endpoint URL'
     };
     const hintMap = {
         ollama:    'e.g. http://127.0.0.1:11434',
         openai:    'e.g. https://api.openai.com  or  http://your-host/proxy-path',
-        anthropic: 'e.g. https://api.anthropic.com  or  http://your-host/proxy-path'
+        anthropic: 'e.g. https://api.anthropic.com  or  http://your-host/proxy-path',
+        google:    'https://generativelanguage.googleapis.com/v1beta/openai  (default, no change needed)'
     };
     document.getElementById('sBaseUrlLabel').textContent   = labelMap[provider] || 'Endpoint URL';
     document.getElementById('sBaseUrl').placeholder        = PROVIDER_DEFAULT_URLS[provider] || '';
@@ -629,11 +633,28 @@ function updateProviderFields() {
     }
 }
 
-// Show Ollama model list as suggestions when typing in the model field
+const GEMINI_MODELS = [
+    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite',
+    'gemini-1.5-pro', 'gemini-1.5-flash'
+];
+
+// Show model suggestions: Ollama fetches from server; Google shows static Gemini list
 async function onModelInput(value) {
-    const box = document.getElementById('modelSuggestions');
+    const box      = document.getElementById('modelSuggestions');
     const provider = document.getElementById('sProvider').value || 'ollama';
-    if (provider !== 'ollama' || value.length < 1) { box.style.display = 'none'; return; }
+    if (value.length < 1) { box.style.display = 'none'; return; }
+
+    if (provider === 'google') {
+        const all = GEMINI_MODELS.filter(m => m.toLowerCase().includes(value.toLowerCase()));
+        if (!all.length) { box.style.display = 'none'; return; }
+        box.innerHTML = all.map(m =>
+            `<div class="model-suggestion-item" onmousedown="event.preventDefault();pickModel('${m}')">${m}</div>`
+        ).join('');
+        box.style.display = 'block';
+        return;
+    }
+
+    if (provider !== 'ollama') { box.style.display = 'none'; return; }
     try {
         const res  = await fetch('/api/model/status');
         const data = await res.json();
@@ -714,6 +735,13 @@ async function applyModelConfig() {
         modelSettings = { provider, model, apiKey: '', baseUrl, temperature, autoConnect, savedAt: Date.now() };
         if (remember) saveSettings();
 
+        // Persist credentials server-side (survives incognito / browser clear)
+        fetch('/api/prefs/model', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)   // payload already conditionally includes apiKey
+        }).catch(() => {});
+
         updateHeaderIndicator(data.connected !== false, model);
         closeSettingsModal();
     } catch (e) {
@@ -747,13 +775,15 @@ async function handleConfigUpload(event) {
         if (statusData.ollamaBaseUrl)    PROVIDER_DEFAULT_URLS.ollama    = statusData.ollamaBaseUrl;
         if (statusData.openAiBaseUrl)    PROVIDER_DEFAULT_URLS.openai    = statusData.openAiBaseUrl;
         if (statusData.anthropicBaseUrl) PROVIDER_DEFAULT_URLS.anthropic = statusData.anthropicBaseUrl;
+        if (statusData.googleBaseUrl)    PROVIDER_DEFAULT_URLS.google    = statusData.googleBaseUrl;
 
         // Populate form fields
         selectProvider(provider);
         document.getElementById('sModel').value = model;
 
-        const runtimeUrl = statusData[provider === 'openai' ? 'openAiBaseUrl'
+        const runtimeUrl = statusData[provider === 'openai'    ? 'openAiBaseUrl'
                                      : provider === 'anthropic' ? 'anthropicBaseUrl'
+                                     : provider === 'google'    ? 'googleBaseUrl'
                                      : 'ollamaBaseUrl'] || '';
         document.getElementById('sBaseUrl').value = runtimeUrl;
 
@@ -798,6 +828,7 @@ async function autoConnect() {
         if (data.ollamaBaseUrl)    PROVIDER_DEFAULT_URLS.ollama    = data.ollamaBaseUrl;
         if (data.openAiBaseUrl)    PROVIDER_DEFAULT_URLS.openai    = data.openAiBaseUrl;
         if (data.anthropicBaseUrl) PROVIDER_DEFAULT_URLS.anthropic = data.anthropicBaseUrl;
+        if (data.googleBaseUrl)    PROVIDER_DEFAULT_URLS.google    = data.googleBaseUrl;
 
         if (hasSaved && modelSettings.autoConnect) {
             // User previously saved settings — trust server state as connected
@@ -823,4 +854,317 @@ setInterval(async () => {
     }
 }, 30000);
 
+// ── Watchlist / Favorites ─────────────────────────────────────────────────
+const WL_KEY       = 'alphaquant_watchlist';   // localStorage fallback keys
+const WL_NAMES_KEY = 'alphaquant_wl_names';
+const WL_MAX       = 10;
+
+let wlFavorites    = [];
+let wlNames        = {};
+let wlRefreshTimer = null;
+
+function loadWatchlist() {
+    try {
+        const raw = localStorage.getItem(WL_KEY);
+        if (raw) wlFavorites = JSON.parse(raw).slice(0, WL_MAX);
+    } catch (e) { wlFavorites = []; }
+}
+
+function loadWlNames() {
+    try {
+        const raw = localStorage.getItem(WL_NAMES_KEY);
+        if (raw) wlNames = JSON.parse(raw);
+    } catch (e) { wlNames = {}; }
+}
+
+// Unified save — server (primary) + localStorage (fallback for offline)
+async function saveWlData() {
+    try {
+        await fetch('/api/prefs/watchlist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ watchlist: wlFavorites, names: wlNames })
+        });
+    } catch (e) { /* server unavailable, localStorage fallback below */ }
+    try { localStorage.setItem(WL_KEY,       JSON.stringify(wlFavorites)); } catch (e) {}
+    try { localStorage.setItem(WL_NAMES_KEY, JSON.stringify(wlNames));     } catch (e) {}
+}
+
+async function fetchAndCacheWlName(sym) {
+    if (wlNames[sym]) return;
+    try {
+        const res   = await fetch(`/api/search?q=${encodeURIComponent(sym)}`);
+        if (!res.ok) return;
+        const items = await res.json();
+        const match = items && (items.find(i => i.symbol === sym) || items[0]);
+        if (match && match.name && match.name !== sym) {
+            wlNames[sym] = match.name;
+            saveWlData();
+        }
+    } catch (e) { /* silent */ }
+}
+
+function addFavorite() {
+    const input = document.getElementById('wlInput');
+    if (!input) return;
+    const sym = input.value.trim().toUpperCase().replace(/[^A-Z.]/g, '');
+    if (!sym) return;
+    hideWlSuggestions();
+    if (wlFavorites.includes(sym)) { input.value = ''; return; }
+    if (wlFavorites.length >= WL_MAX) {
+        alert(`Watchlist is full (max ${WL_MAX}). Remove a stock first.`);
+        return;
+    }
+    wlFavorites.push(sym);
+    saveWlData();
+    renderWatchlist();
+    input.value = '';
+    refreshWlSingle(sym);
+    fetchAndCacheWlName(sym);
+}
+
+function removeFavorite(sym) {
+    wlFavorites = wlFavorites.filter(s => s !== sym);
+    saveWlData();
+    renderWatchlist();
+}
+
+// ── Watchlist input autocomplete ──────────────────────────────────────────
+let wlSuggestTimer = null;
+
+function handleWlInput(value) {
+    const val = value.trim();
+    if (val.length < 1) { hideWlSuggestions(); return; }
+    clearTimeout(wlSuggestTimer);
+    wlSuggestTimer = setTimeout(async () => {
+        try {
+            const res = await fetch(`/api/search?q=${encodeURIComponent(val)}`);
+            if (!res.ok) { hideWlSuggestions(); return; }
+            const items = await res.json();
+            showWlSuggestions(items);
+        } catch (e) { hideWlSuggestions(); }
+    }, 280);
+}
+
+function showWlSuggestions(items) {
+    const box   = document.getElementById('wlSuggestions');
+    const input = document.getElementById('wlInput');
+    if (!box || !input || !items || !items.length) { hideWlSuggestions(); return; }
+
+    box.innerHTML = items.map(i => {
+        const safeName = (i.name || '').replace(/'/g, '&#39;');
+        return `<div class="wl-sug-item" onmousedown="event.preventDefault();pickWlSuggestion('${i.symbol}','${safeName}')">` +
+            `<span class="wl-sug-ticker">${i.symbol}</span>` +
+            `<span class="wl-sug-name">${i.name || ''}</span>` +
+        `</div>`;
+    }).join('');
+
+    const rect = input.getBoundingClientRect();
+    box.style.left    = rect.left + 'px';
+    box.style.top     = (rect.bottom + 4) + 'px';
+    box.style.width   = Math.max(rect.width, 200) + 'px';
+    box.style.display = 'block';
+}
+
+function hideWlSuggestions() {
+    const box = document.getElementById('wlSuggestions');
+    if (box) box.style.display = 'none';
+    clearTimeout(wlSuggestTimer);
+}
+
+function pickWlSuggestion(sym, name) {
+    const input = document.getElementById('wlInput');
+    if (input) input.value = sym;
+    if (name && name !== sym) {
+        wlNames[sym] = name;
+        saveWlData();
+    }
+    hideWlSuggestions();
+    addFavorite();
+}
+
+function handleWlKeydown(event) {
+    if (event.key === 'Escape') { hideWlSuggestions(); return; }
+    if (event.key === 'Enter')  { event.preventDefault(); addFavorite(); }
+}
+
+function renderWatchlist() {
+    const list  = document.getElementById('wlList');
+    const count = document.getElementById('wlCount');
+    if (!list) return;
+    if (count) count.textContent = `${wlFavorites.length}/${WL_MAX}`;
+
+    if (!wlFavorites.length) {
+        list.innerHTML = '<div class="wl-empty">No stocks yet.<br>Type a ticker &amp; press + to add.</div>';
+        return;
+    }
+
+    list.innerHTML = wlFavorites.map(sym =>
+        `<div class="wl-item" data-wl-sym="${sym}"` +
+            ` onclick="analyzeWatchlistStock('${sym}')"` +
+            ` onmouseenter="showWlTooltip('${sym}',event)"` +
+            ` onmouseleave="hideWlTooltip()"` +
+            ` title="Click to analyze ${sym}">` +
+            `<div class="wl-item-main">` +
+                `<span class="wl-sym">${sym}</span>` +
+                `<button class="wl-remove" onclick="event.stopPropagation();removeFavorite('${sym}')" title="Remove">×</button>` +
+            `</div>` +
+            `<div class="wl-item-price">` +
+                `<span class="wl-price" id="wlPrice_${sym}">…</span>` +
+                `<span class="wl-chg flat" id="wlChg_${sym}"></span>` +
+            `</div>` +
+        `</div>`
+    ).join('');
+}
+
+async function refreshWlSingle(sym) {
+    try {
+        const res  = await fetch(`/api/price/${encodeURIComponent(sym)}`);
+        if (!res.ok) throw new Error('http-error');
+        const data = await res.json();
+        if (!data || data.price <= 0) throw new Error('no-price');
+
+        const sign  = data.change >= 0 ? '+' : '';
+        const cls   = data.change > 0.005 ? 'up' : (data.change < -0.005 ? 'down' : 'flat');
+        const arrow = cls === 'up' ? '▲' : (cls === 'down' ? '▼' : '—');
+        const color = cls === 'up' ? '#28a745' : (cls === 'down' ? '#dc3545' : '#888');
+
+        const priceEl = document.getElementById(`wlPrice_${sym}`);
+        const chgEl   = document.getElementById(`wlChg_${sym}`);
+        if (priceEl) { priceEl.textContent = '$' + data.price.toFixed(2); priceEl.style.color = color; }
+        if (chgEl)   { chgEl.textContent = `${arrow} ${sign}${data.changePercent.toFixed(2)}%`; chgEl.className = 'wl-chg ' + cls; }
+    } catch (e) {
+        // Only reset the loading indicator; keep a valid price if already showing
+        const priceEl = document.getElementById(`wlPrice_${sym}`);
+        if (priceEl && priceEl.textContent === '…') {
+            priceEl.textContent = '—';
+            priceEl.style.color = '#aaa';
+        }
+    }
+}
+
+async function refreshWatchlist() {
+    if (!wlFavorites.length) return;
+    await Promise.all(wlFavorites.map(sym => refreshWlSingle(sym)));
+    const timeEl = document.getElementById('wlTime');
+    if (timeEl) {
+        timeEl.textContent = new Date().toLocaleTimeString(
+            'en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }
+        ) + ' ET';
+    }
+}
+
+function setWlInterval(secs) {
+    if (wlRefreshTimer) clearInterval(wlRefreshTimer);
+    wlRefreshTimer = null;
+    const n = parseInt(secs, 10);
+    if (n > 0) wlRefreshTimer = setInterval(refreshWatchlist, n * 1000);
+}
+
+function analyzeWatchlistStock(sym) {
+    const inputEl = document.getElementById('commandInput');
+    if (!inputEl) return;
+    inputEl.value = `analyze ${sym}`;
+    hideSuggestions();
+    dispatchCommand();
+}
+
+// ── Watchlist name tooltip (chatbox popup) ────────────────────────────────
+function positionWlTooltip(tip, rect) {
+    tip.style.display = 'block';
+    const tw = tip.offsetWidth || 160;
+    let left     = rect.right + 10;
+    let arrowDir = 'right';
+    if (left + tw > window.innerWidth - 12) { left = rect.left - tw - 10; arrowDir = 'left'; }
+    tip.style.left      = left + 'px';
+    tip.style.top       = (rect.top + rect.height / 2) + 'px';
+    tip.style.transform = 'translateY(-50%)';
+    tip.dataset.arrow   = arrowDir;
+}
+
+function showWlTooltip(sym, evt) {
+    const tip = document.getElementById('wlTooltip');
+    if (!tip) return;
+    const rect = evt.currentTarget.getBoundingClientRect();
+    const name = wlNames[sym];
+
+    if (name && name !== sym) {
+        tip.textContent = name;
+        positionWlTooltip(tip, rect);
+        return;
+    }
+
+    // Name not cached yet — show loading dot and fetch
+    tip.textContent = '…';
+    positionWlTooltip(tip, rect);
+
+    fetchAndCacheWlName(sym).then(() => {
+        const fetched = wlNames[sym];
+        if (fetched && fetched !== sym && tip.style.display === 'block') {
+            tip.textContent = fetched;
+            positionWlTooltip(tip, rect);
+        } else if (tip.textContent === '…') {
+            tip.style.display = 'none'; // nothing to show
+        }
+    });
+}
+
+function hideWlTooltip() {
+    const tip = document.getElementById('wlTooltip');
+    if (tip) tip.style.display = 'none';
+}
+
+// ── Dark / Light mode ─────────────────────────────────────────────────────
+const THEME_KEY = 'alphaquant_theme';
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = theme === 'dark' ? '☀' : '🌙';
+}
+
+function toggleTheme() {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    fetch('/api/prefs/theme', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: next })
+    }).catch(() => {});
+}
+
+// ── Boot: load all prefs from server, fall back to localStorage ───────────
+async function initPrefs() {
+    let prefs = null;
+    try {
+        const res = await fetch('/api/prefs');
+        if (res.ok) prefs = await res.json();
+    } catch (e) { /* server not ready — use localStorage */ }
+
+    // Theme
+    const theme = (prefs && prefs.theme) || localStorage.getItem(THEME_KEY) || 'light';
+    applyTheme(theme);
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
+
+    // Watchlist
+    if (prefs && prefs.watchlist) {
+        wlFavorites = prefs.watchlist.slice(0, WL_MAX);
+        wlNames     = prefs.watchlistNames || {};
+        try { localStorage.setItem(WL_KEY,       JSON.stringify(wlFavorites)); } catch (e) {}
+        try { localStorage.setItem(WL_NAMES_KEY, JSON.stringify(wlNames));     } catch (e) {}
+    } else {
+        loadWlNames();
+        loadWatchlist();
+    }
+
+    renderWatchlist();
+    wlFavorites.forEach(sym => { if (!wlNames[sym]) fetchAndCacheWlName(sym); });
+    refreshWatchlist();
+    setWlInterval(30);
+}
+
 autoConnect();
+// Apply theme from localStorage immediately (fast path before server responds)
+applyTheme(localStorage.getItem(THEME_KEY) || 'light');
+initPrefs();

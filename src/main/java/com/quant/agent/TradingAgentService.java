@@ -146,6 +146,16 @@ public class TradingAgentService {
     @Value("${spring.ai.anthropic.chat.options.model:claude-sonnet-4-6}")
     private String defaultAnthropicModel;
 
+    // Google Gemini — uses OpenAI-compatible endpoint (no extra Maven dependency needed)
+    @Value("${GOOGLE_API_KEY:}")
+    private String googleApiKey;
+
+    private static final String DEFAULT_GOOGLE_BASE_URL  = "https://generativelanguage.googleapis.com/v1beta/openai";
+    private static final String DEFAULT_GOOGLE_MODEL     = "gemini-2.0-flash";
+
+    private volatile String runtimeGoogleKey;
+    private volatile String runtimeGoogleBaseUrl;
+
     private final HttpClient statusHttpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
@@ -409,6 +419,20 @@ public class TradingAgentService {
                     ---
                     """;
 
+    // ── Quick-answer system prompt — used ONLY for direct questions about a single stock ──
+    private static final String QUICK_ANSWER_RULES = """
+            You are a concise stock trading assistant. The user asked a direct question about a specific stock.
+
+            Your job:
+            1. Call stockPriceFunction for the ticker named in [Intent: QUICK_QUESTION for TICKER].
+            2. Answer ONLY the specific question asked — in 2 to 5 plain English sentences.
+            3. Reference real numbers: current price, key levels (support/resistance), RSI, trend direction, or relevant technicals.
+            4. If the question is about whether to buy a call or put, or which strike, give a specific actionable recommendation.
+            5. State clearly if the trend/setup is bullish, bearish, or neutral, and on which timeframe.
+            6. Do NOT produce the full dashboard template, table, or headers. No HTML tables. No lengthy analysis.
+            7. Be direct and specific. Avoid generic disclaimers like "this is not financial advice" in every sentence.
+            """;
+
     public TradingAgentService(ChatClient.Builder chatClientBuilder) {
         this.ollamaClientBuilder = chatClientBuilder
                 .defaultSystem(BASE_RULES + STOCK_TEMPLATE + SCANNER_TEMPLATE + PRE_MARKET_TEMPLATE + WHEEL_TEMPLATE + SWING_SCANNER_TEMPLATE)
@@ -424,6 +448,7 @@ public class TradingAgentService {
         activeChatClient = ollamaClient;
         tryInitOpenAi(openAiKey, defaultOpenAiModel, defaultOpenAiBaseUrl);
         tryInitAnthropic(anthropicKey, defaultAnthropicModel, defaultAnthropicBaseUrl);
+        tryInitGoogle(googleApiKey, DEFAULT_GOOGLE_MODEL, DEFAULT_GOOGLE_BASE_URL);
         loadSavedConfig();
     }
 
@@ -477,16 +502,29 @@ public class TradingAgentService {
             }
         }
 
-        if ("openai".equals(provider) || "anthropic".equals(provider)) {
+        if ("openai".equals(provider) || "anthropic".equals(provider) || "google".equals(provider)) {
             // Fall back to stored runtime key when form left the key field blank (e.g. after file upload)
             String resolvedKey = isValidKey(apiKey) ? apiKey
-                    : ("openai".equals(provider) ? runtimeOpenAiKey : runtimeAnthropicKey);
+                    : ("openai".equals(provider)    ? runtimeOpenAiKey
+                    : "google".equals(provider)     ? runtimeGoogleKey
+                    :                                 runtimeAnthropicKey);
             String resolvedUrl = isValidUrl(baseUrl) ? baseUrl
-                    : ("openai".equals(provider) ? runtimeOpenAiBaseUrl : runtimeAnthropicBaseUrl);
-            if (!isValidKey(resolvedKey)) return Map.of("connected", false, "error", "API key is required");
-            if (!isValidUrl(resolvedUrl)) return Map.of("connected", false, "error", "Base URL is required");
+                    : ("openai".equals(provider)    ? runtimeOpenAiBaseUrl
+                    : "google".equals(provider)     ? runtimeGoogleBaseUrl
+                    :                                 runtimeAnthropicBaseUrl);
+            if (!isValidKey(resolvedKey)) {
+                log.warn("[TEST-CONN] {} — API key missing", provider);
+                return Map.of("connected", false, "error", "API key is required");
+            }
+            if (!isValidUrl(resolvedUrl)) {
+                log.warn("[TEST-CONN] {} — base URL missing or invalid", provider);
+                return Map.of("connected", false, "error", "Base URL is required");
+            }
             String model = config.getOrDefault("model", "");
-            if (model.isBlank()) return Map.of("connected", false, "error", "Model name is required");
+            if (model.isBlank()) {
+                log.warn("[TEST-CONN] {} — model name is blank", provider);
+                return Map.of("connected", false, "error", "Model name is required");
+            }
 
             // Send a minimal chat completion to verify BOTH connectivity and model availability.
             // GET /v1/models is unreliable on enterprise proxies — they often return 404/405 even
@@ -508,20 +546,32 @@ public class TradingAgentService {
                 HttpResponse<String> resp = statusHttpClient.send(req, HttpResponse.BodyHandlers.ofString());
                 int status = resp.statusCode();
                 if (status == 200 || status == 201) return Map.of("connected", true);
-                if (status == 401) return Map.of("connected", false, "error", "Invalid API key (401 Unauthorized)");
-                if (status == 403) return Map.of("connected", false, "error", "Access forbidden (403)");
-                if (status == 429) return Map.of("connected", false, "error", "Rate limit exceeded — try again later");
+                String respBody = resp.body() != null ? resp.body() : "";
+                if (status == 401) {
+                    log.warn("[TEST-CONN] {} — 401 Unauthorized. model={} url={} body={}", provider, model, chatUrl, respBody);
+                    return Map.of("connected", false, "error", "Invalid API key (401 Unauthorized)");
+                }
+                if (status == 403) {
+                    log.warn("[TEST-CONN] {} — 403 Forbidden. model={} url={} body={}", provider, model, chatUrl, respBody);
+                    return Map.of("connected", false, "error", "Access forbidden (403)");
+                }
+                if (status == 429) {
+                    log.warn("[TEST-CONN] {} — 429 Rate limited. model={} url={}", provider, model, chatUrl);
+                    return Map.of("connected", false, "error", "Rate limit exceeded — try again later");
+                }
                 if (status == 404) {
-                    String respBody = resp.body() != null ? resp.body() : "";
-                    if (respBody.contains("model_not_found")) {
+                    log.warn("[TEST-CONN] {} — 404. model={} url={} body={}", provider, model, chatUrl, respBody);
+                    if (respBody.contains("model_not_found") || respBody.contains("MODEL_NOT_FOUND")) {
                         return Map.of("connected", false, "error",
                                 "Model '" + model + "' not found — verify the model name with your provider");
                     }
                     return Map.of("connected", false, "error",
                             "Endpoint not found (404) — verify the base URL");
                 }
-                return Map.of("connected", false, "error", "Server returned HTTP " + status);
+                log.warn("[TEST-CONN] {} — HTTP {}. model={} url={} body={}", provider, status, model, chatUrl, respBody);
+                return Map.of("connected", false, "error", "Server returned HTTP " + status + " — " + respBody.substring(0, Math.min(200, respBody.length())));
             } catch (Exception e) {
+                log.warn("[TEST-CONN] {} — exception: {}", provider, e.getMessage());
                 return Map.of("connected", false, "error", "Connection error: " + e.getMessage());
             }
         }
@@ -539,8 +589,12 @@ public class TradingAgentService {
             return Map.of("connected", false, "error",
                     "No API key configured — upload a config file or enter the key in settings");
         }
-        String baseUrl = "openai".equals(activeProvider) ? runtimeOpenAiBaseUrl : runtimeAnthropicBaseUrl;
-        String key     = "openai".equals(activeProvider) ? runtimeOpenAiKey     : runtimeAnthropicKey;
+        String baseUrl = "openai".equals(activeProvider) ? runtimeOpenAiBaseUrl
+                       : "google".equals(activeProvider) ? runtimeGoogleBaseUrl
+                       : runtimeAnthropicBaseUrl;
+        String key     = "openai".equals(activeProvider) ? runtimeOpenAiKey
+                       : "google".equals(activeProvider) ? runtimeGoogleKey
+                       : runtimeAnthropicKey;
         if (baseUrl == null || key == null) {
             return Map.of("connected", false, "error", "Provider not fully configured");
         }
@@ -627,6 +681,33 @@ public class TradingAgentService {
         }
     }
 
+    private void tryInitGoogle(String key, String model, String baseUrl) {
+        if (!isValidKey(key)) return;
+        try {
+            String resolvedUrl   = isValidUrl(baseUrl) ? baseUrl : DEFAULT_GOOGLE_BASE_URL;
+            String resolvedModel = (model != null && !model.isBlank()) ? model : DEFAULT_GOOGLE_MODEL;
+            OpenAiApi api = OpenAiApi.builder()
+                    .apiKey(key)
+                    .baseUrl(resolvedUrl)
+                    .build();
+            OpenAiChatOptions options = OpenAiChatOptions.builder()
+                    .model(resolvedModel)
+                    .temperature(0.0)
+                    .build();
+            OpenAiChatModel chatModel = OpenAiChatModel.builder()
+                    .openAiApi(api)
+                    .defaultOptions(options)
+                    .toolCallingManager(toolCallingManager)
+                    .build();
+            providerClients.put("google", wrapWithDefaults(ChatClient.builder(chatModel)));
+            runtimeGoogleBaseUrl = resolvedUrl;
+            runtimeGoogleKey     = key;
+            log.info("Google Gemini provider ready — model: {}, url: {}", resolvedModel, resolvedUrl);
+        } catch (Exception e) {
+            log.warn("Google Gemini init failed: {}", e.getMessage());
+        }
+    }
+
     private static boolean isValidUrl(String url) {
         return url != null && !url.isBlank() && (url.startsWith("http://") || url.startsWith("https://"));
     }
@@ -644,9 +725,10 @@ public class TradingAgentService {
         r.put("temperature", activeTemperature);
         r.put("connected", checkConnected());
         r.put("availableProviders", new ArrayList<>(providerClients.keySet()));
-        r.put("ollamaBaseUrl", ollamaBaseUrl);
-        r.put("openAiBaseUrl", runtimeOpenAiBaseUrl != null ? runtimeOpenAiBaseUrl : defaultOpenAiBaseUrl);
+        r.put("ollamaBaseUrl",    ollamaBaseUrl);
+        r.put("openAiBaseUrl",    runtimeOpenAiBaseUrl    != null ? runtimeOpenAiBaseUrl    : defaultOpenAiBaseUrl);
         r.put("anthropicBaseUrl", runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl);
+        r.put("googleBaseUrl",    runtimeGoogleBaseUrl    != null ? runtimeGoogleBaseUrl    : DEFAULT_GOOGLE_BASE_URL);
         if ("ollama".equals(activeProvider)) r.put("ollamaModels", getOllamaModels());
         return r;
     }
@@ -656,12 +738,14 @@ public class TradingAgentService {
         r.put("provider", activeProvider);
         r.put("model", activeModel);
         r.put("temperature", activeTemperature);
-        r.put("ollamaBaseUrl", ollamaBaseUrl);
-        r.put("openAiBaseUrl", runtimeOpenAiBaseUrl != null ? runtimeOpenAiBaseUrl : defaultOpenAiBaseUrl);
+        r.put("ollamaBaseUrl",    ollamaBaseUrl);
+        r.put("openAiBaseUrl",    runtimeOpenAiBaseUrl    != null ? runtimeOpenAiBaseUrl    : defaultOpenAiBaseUrl);
         r.put("anthropicBaseUrl", runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl);
+        r.put("googleBaseUrl",    runtimeGoogleBaseUrl    != null ? runtimeGoogleBaseUrl    : DEFAULT_GOOGLE_BASE_URL);
         r.put("availableProviders", new ArrayList<>(providerClients.keySet()));
-        r.put("openAiConfigured", providerClients.containsKey("openai"));
+        r.put("openAiConfigured",    providerClients.containsKey("openai"));
         r.put("anthropicConfigured", providerClients.containsKey("anthropic"));
+        r.put("googleConfigured",    providerClients.containsKey("google"));
         return r;
     }
 
@@ -672,7 +756,7 @@ public class TradingAgentService {
         String baseUrl  = config.getOrDefault("baseUrl", "");
         float  temp     = parseFloat(config.get("temperature"), activeTemperature);
 
-        if (!List.of("ollama", "openai", "anthropic").contains(provider)) {
+        if (!List.of("ollama", "openai", "anthropic", "google").contains(provider)) {
             return Map.of("success", false, "error", "Unknown provider: " + provider);
         }
 
@@ -684,6 +768,9 @@ public class TradingAgentService {
             if ("anthropic".equals(provider))
                 tryInitAnthropic(apiKey.isBlank() ? anthropicKey : apiKey, model,
                                  baseUrl.isBlank() ? defaultAnthropicBaseUrl : baseUrl);
+            if ("google".equals(provider))
+                tryInitGoogle(apiKey.isBlank() ? googleApiKey : apiKey, model,
+                              baseUrl.isBlank() ? DEFAULT_GOOGLE_BASE_URL : baseUrl);
         }
 
         if (!providerClients.containsKey(provider)) {
@@ -695,13 +782,15 @@ public class TradingAgentService {
         activeModel       = model;
         activeTemperature = temp;
         activeApiKey      = switch (provider) {
-            case "openai"    -> runtimeOpenAiKey     != null ? runtimeOpenAiKey     : "";
-            case "anthropic" -> runtimeAnthropicKey  != null ? runtimeAnthropicKey  : "";
+            case "openai"    -> runtimeOpenAiKey    != null ? runtimeOpenAiKey    : "";
+            case "anthropic" -> runtimeAnthropicKey != null ? runtimeAnthropicKey : "";
+            case "google"    -> runtimeGoogleKey    != null ? runtimeGoogleKey    : "";
             default          -> "";
         };
         activeBaseUrl     = switch (provider) {
             case "openai"    -> runtimeOpenAiBaseUrl    != null ? runtimeOpenAiBaseUrl    : defaultOpenAiBaseUrl;
             case "anthropic" -> runtimeAnthropicBaseUrl != null ? runtimeAnthropicBaseUrl : defaultAnthropicBaseUrl;
+            case "google"    -> runtimeGoogleBaseUrl    != null ? runtimeGoogleBaseUrl    : DEFAULT_GOOGLE_BASE_URL;
             default          -> ollamaBaseUrl;
         };
         activeChatClient  = providerClients.get(provider);
@@ -716,6 +805,7 @@ public class TradingAgentService {
         return switch (activeProvider) {
             case "openai"    -> providerClients.containsKey("openai");
             case "anthropic" -> providerClients.containsKey("anthropic");
+            case "google"    -> providerClients.containsKey("google");
             default -> checkOllamaReachable();
         };
     }
@@ -822,6 +912,22 @@ public class TradingAgentService {
             return raw + "\n\n[Intent: Call generalMarketScannerFunction — user wants a broad market scan]";
         }
 
+        // 3e. Quick question about a specific stock — short plain-English answer, no template
+        if (ticker != null) {
+            boolean hasQuestionMark = raw.trim().endsWith("?");
+            boolean hasQuestionWord = lower.matches(
+                    ".*\\b(should i|should we|will it|will [a-z]+|is it|is [a-z]+|has [a-z]+|have [a-z]+|did [a-z]+|" +
+                    "would you|would i|can [a-z]+|could [a-z]+|when should|when will|why is|why did|why has|" +
+                    "how is|how does|flip|flipped|reversal|reversed|bounce|breaking|holding|good time to|time to buy|time to sell)\\b.*");
+            boolean isCommand = lower.matches(
+                    ".*\\b(analyze|analysis|check|scan|show me|tell me|give me|run|pull up|look at)\\b.*");
+            if ((hasQuestionMark || hasQuestionWord) && !isCommand) {
+                log.info("[INTENT] quickQuestion ticker={}", ticker);
+                return raw + "\n\n[Intent: QUICK_QUESTION for " + ticker
+                        + " — call stockPriceFunction then answer only the specific question asked, 2–5 plain English sentences, no template or table]";
+            }
+        }
+
         // 4. Trend / technicals with a specific ticker
         if (ticker != null && lower.matches(".*\\b(trend|rsi|ema|technical|chart|signal|momentum|macd|sma).*")) {
             log.info("[INTENT] stockPrice ticker={} (technicals)", ticker);
@@ -870,9 +976,13 @@ public class TradingAgentService {
                         input.length() > 120 ? input.substring(0, 120) + "…" : input);
 
                 long t0 = System.currentTimeMillis();
-                var promptSpec = client.prompt().user(injectDynamicContext(input));
+                String enrichedInput = injectDynamicContext(input);
+                boolean quickQuestion = enrichedInput.contains("[Intent: QUICK_QUESTION");
+                var promptSpec = quickQuestion
+                        ? client.prompt().system(QUICK_ANSWER_RULES).user(enrichedInput)
+                        : client.prompt().user(enrichedInput);
                 String response = switch (activeProvider) {
-                    case "openai"    -> promptSpec.options(
+                    case "openai", "google" -> promptSpec.options(
                                             OpenAiChatOptions.builder().model(activeModel).build()
                                         ).call().content();
                     case "anthropic" -> promptSpec.options(

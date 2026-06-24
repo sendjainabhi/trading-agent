@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 @CrossOrigin(origins = "*", allowedHeaders = "*")
 @RestController
@@ -37,16 +38,25 @@ public class TradingAgentController {
 
     private final TradingAgentService tradingAgentService;
     private final AlpacaStreamService alpacaStreamService;
+    private final UserPrefsService    userPrefsService;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
 
     public TradingAgentController(TradingAgentService tradingAgentService,
-                                  AlpacaStreamService alpacaStreamService) {
+                                  AlpacaStreamService alpacaStreamService,
+                                  UserPrefsService userPrefsService) {
         this.tradingAgentService = tradingAgentService;
         this.alpacaStreamService = alpacaStreamService;
+        this.userPrefsService    = userPrefsService;
     }
+
+    // 15-second TTL cache — prevents hammering Yahoo Finance on every UI refresh tick
+    private record CachedPrice(PriceResponse response, long fetchedAt) {
+        boolean fresh() { return System.currentTimeMillis() - fetchedAt < 15_000; }
+    }
+    private final ConcurrentHashMap<String, CachedPrice> priceCache = new ConcurrentHashMap<>();
 
     public record ChatRequest(String input) {}
 
@@ -75,6 +85,9 @@ public class TradingAgentController {
     public PriceResponse getPrice(@PathVariable String symbol) {
         String sym = symbol.toUpperCase().trim();
         alpacaStreamService.subscribe(sym);
+
+        CachedPrice hit = priceCache.get(sym);
+        if (hit != null && hit.fresh()) return hit.response();
 
         try {
             HttpRequest req = HttpRequest.newBuilder()
@@ -111,7 +124,9 @@ public class TradingAgentController {
                 double change    = prevClose > 0 ? price - prevClose : 0.0;
                 double changePct = prevClose > 0 ? (change / prevClose) * 100.0 : 0.0;
                 String updatedAt = TIME_FMT.format(LocalTime.now(ET));
-                return new PriceResponse(sym, price, change, changePct, updatedAt, source);
+                PriceResponse resp = new PriceResponse(sym, price, change, changePct, updatedAt, source);
+                priceCache.put(sym, new CachedPrice(resp, System.currentTimeMillis()));
+                return resp;
             }
         } catch (Exception e) {
             log.warn("Price refresh failed for {}: {}", sym, e.getMessage());
@@ -133,7 +148,11 @@ public class TradingAgentController {
 
     @PostMapping("/api/model/config")
     public Map<String, Object> setModelConfig(@RequestBody Map<String, String> config) {
-        return tradingAgentService.updateModelConfig(config);
+        Map<String, Object> result = tradingAgentService.updateModelConfig(config);
+        if (Boolean.TRUE.equals(result.get("success"))) {
+            userPrefsService.setModelConfig(config);
+        }
+        return result;
     }
 
     @PostMapping("/api/model/test")
