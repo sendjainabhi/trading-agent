@@ -34,22 +34,57 @@ Download from: https://adoptium.net
 
 ### 2. Alpaca API Key — Live Market Data
 
-Alpaca provides free real-time stock quotes, bars, and WebSocket streaming.
+Alpaca provides free real-time US stock quotes, historical bars, and WebSocket streaming.
+No deposit or brokerage account is needed — a free paper trading account is enough.
 
-1. Sign up at **https://alpaca.markets**
-2. Go to **Paper Trading** → **Overview** → **API Keys** → **Generate New Key**
-3. Copy your **Key ID** and **Secret Key**
-4. A free paper trading account is sufficient — no deposit required
+**Sign up and get your key:**
+
+1. Go to **https://alpaca.markets** and click **Sign Up**
+2. Complete email verification and log in
+3. On the left sidebar click **Paper Trading**
+4. In the top-right area click **Get API Keys** (or go to **Overview → API Keys**)
+5. Click **Generate New Key**
+6. Copy and save both values immediately — the **Key ID** and **Secret Key**
+   > The Secret Key is shown only once. If you lose it, regenerate a new pair.
+7. Paste them into `application.yml`:
+   ```yaml
+   alpaca:
+     api:
+       key: "PKxxxxxxxxxxxxxxxxxxxxxx"      # your Key ID
+       secret: "xxxxxxxxxxxxxxxxxxxxxxxx"  # your Secret Key
+   ```
+
+**What AlphaQuant uses Alpaca for:**
+- Real-time stock price quotes via WebSocket (IEX free feed)
+- Historical OHLCV bars for multi-timeframe technical analysis
+- Options chain data for strike recommendations
 
 ---
 
 ### 3. Finnhub API Key — Insider & Analyst Data
 
-Finnhub provides insider sentiment (MSPR), analyst ratings, and earnings data.
+Finnhub provides insider trading sentiment (MSPR), analyst buy/hold/sell ratings, earnings dates, and institutional ownership data.
+The free tier is completely sufficient for personal use.
 
-1. Sign up at **https://finnhub.io**
-2. After login, your API key is shown on the **Dashboard** home screen
-3. Free tier: 60 API calls/minute — sufficient for personal use
+**Sign up and get your key:**
+
+1. Go to **https://finnhub.io** and click **Get free API key** (top-right)
+2. Sign up with email or continue with Google
+3. After login you land on the **Dashboard** — your API key is shown in the center of the page under **Your API Key**
+4. Copy the key (it looks like: `d8i9xxxxxxxxxxxxxxxxxxxx`)
+5. Paste it into `application.yml`:
+   ```yaml
+   market:
+     provider:
+       api-key: "d8i9xxxxxxxxxxxxxxxxxxxx"
+   ```
+
+**Free tier limits:** 60 API calls/minute, access to insider sentiment, analyst ratings, earnings calendar, and basic fundamentals — all that AlphaQuant needs.
+
+**What AlphaQuant uses Finnhub for:**
+- Insider MSPR (buy/sell sentiment ratio) on every stock analysis
+- Analyst consensus (Buy / Hold / Sell counts)
+- Earnings date alerts
 
 ---
 
