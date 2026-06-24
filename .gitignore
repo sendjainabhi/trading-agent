@@ -32,3 +32,5 @@ target/
 
 # Root-level config/credential files — contain API keys, never commit
 /*.properties
+# Exception: sample file with no real keys is safe to commit
+!model-config.sample.properties
