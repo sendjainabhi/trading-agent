@@ -27,10 +27,11 @@ public class UserPrefsService {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Prefs {
-        public List<String>        watchlist      = new ArrayList<>();
-        public Map<String, String> watchlistNames = new HashMap<>();
-        public String              theme          = "light";
-        public Map<String, String> modelConfig    = new HashMap<>();
+        public List<String>              watchlist      = new ArrayList<>();
+        public Map<String, String>       watchlistNames = new HashMap<>();
+        public String                    theme          = "light";
+        public Map<String, String>       modelConfig    = new HashMap<>();
+        public List<Map<String, String>> journal        = new ArrayList<>();
     }
 
     @PostConstruct
@@ -75,5 +76,19 @@ public class UserPrefsService {
 
     public Map<String, String> getModelConfig() {
         return prefs.modelConfig;
+    }
+
+    public List<Map<String, String>> getJournal() {
+        return new ArrayList<>(prefs.journal);
+    }
+
+    public synchronized void addJournalEntry(Map<String, String> entry) {
+        prefs.journal.add(0, new HashMap<>(entry)); // newest first
+        persist();
+    }
+
+    public synchronized void clearJournal() {
+        prefs.journal.clear();
+        persist();
     }
 }

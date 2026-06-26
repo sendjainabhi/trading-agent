@@ -10,15 +10,25 @@ AlphaQuant is a personal AI trading assistant that connects to live market data,
 |---|---|
 | 📊 Multi-Timeframe Analysis | Full trade plan — trend across Daily/1h/15m/5m, RSI, VWAP, ADX, options strikes |
 | 🔄 Swing Trade Detection | Swing high/low levels from 30+ bars, tested-N× count, SWING_LONG / SWING_SHORT / RANGE_PLAY |
-| 🔍 Six Market Scanners | Market Scan, Bullish, Bearish, Swing, Pre-Market, Wheel Strategy |
+| 🔍 11 Market Scanners | Market Scan, Bullish, Bearish, Swing, Pre-Market, Wheel Strategy, Sector Rotation, Squeeze, Earnings Plays, Failed Breakdowns, Watchlist Scan |
 | 💬 Plain-English Q&A | Ask direct questions ("has AAPL trend flipped?") and get short focused answers |
-| ⭐ Watchlist Sidebar | Up to 10 tickers, auto-refresh prices, click to analyze |
+| ⭐ Watchlist Sidebar | Up to 15 tickers, auto-refresh prices, click to analyze, 📊 Scan button to scan all at once |
 | 🌙 Dark / Light Mode | Full theme switch, preference saved across sessions |
 | 🤖 Multi-Provider AI | Ollama (local) · OpenAI · Anthropic · Google Gemini — switch live, no restart |
 | 💾 Persistent Settings | Watchlist, model credentials, and theme saved server-side across restarts and incognito |
 | 📐 Price Targets | IV-based expected move for tomorrow, next week, and 15-day range |
 | 🐋 Smart Money Signals | Insider MSPR, analyst consensus, institutional flow |
 | 🌍 Market Regime | SPY + VIX regime detection (Normal / Elevated / High Fear), auto position sizing |
+| 🎯 Win Probability | Every trade card shows estimated win rate (35–82%) from 12 weighted signals |
+| 📈 3-Strategy Options Ladder | Each trade shows Option A (1-leg), Option B (debit spread), Option C (credit spread) with a Recommended tag |
+| ⚡ Directional Q&A | "Will TSLA go up next week?" returns a plain-English verdict, 3 reasons, probability, and what flips it — no full dashboard |
+| 🔴🟢 Daily S/R Tiers | R1→R2→R3 resistance and S1→S2→S3 support (Immediate → Session → Structural) on every analysis |
+| ↩️ Alt Scenario Cards | Every buy card shows a bear fallback; every sell card shows a bull fallback |
+| 📋 Stock + Options in Scanners | Every scanner row shows a direct stock play (Buy/Short at support/resistance) alongside the options play |
+| 🎯 Best Play Card | Scanner results include a "Best Play Right Now" recommendation with the highest-conviction setup |
+| 🏷️ Ticker Badge | Analysis responses are tagged with a [SYMBOL] pill |
+| 📉 TradingView Chart | Embedded interactive chart — expand / collapse per ticker |
+| ⚠️ Earnings Safety | When earnings are within 10 days, trade cards automatically switch to Iron Condor / stand-aside mode |
 
 ---
 
@@ -223,6 +233,12 @@ swing trade setups
 scan the market and show top options plays
 what are the biggest bullish movers today?
 wheel strategy scan
+sector rotation scan
+show me squeeze setups
+earnings plays scan
+failed breakdown reversal setups
+will TSLA go up next week? what are the chances?
+is NVDA likely to drop from here?
 ```
 
 ---
@@ -235,11 +251,17 @@ AAPL ($295.65)  |  ⏳ Hold & Wait  |  ✅ Normal  |  Market Closed  |  -0.79%
 Trend: Daily ↓ · 1h ↓ · 15m ↓ · 5m ↓  |  RSI 42.1 (weak)
 VWAP $299.33  |  Vol 40,202,659  |  ADX 25.9 (Trending)
 Key Levels: PDH $301.88 · PDL $294.22
+Daily S/R — R1 $299.33 ──▶ R2 $301.88 ──▶ R3 $308.45 (structural)
+           S1 $294.22 ──▶ S2 $292.00 ──▶ S3 $289.10 (structural)
 Swing Support: $289.10 (3× tested)  ·  Swing Resistance: $308.45
 Price Targets (IV 32.1%): Tomorrow $292–$299  ·  Next week $287–$304  ·  15-day $280–$311
 Smart Money: Institutions Buying  |  Insider MSPR 45.20 (buying)  |  Analysts 35 Buy · 8 Hold
 
-WHAT TO DO  [Buy / Sell / Hold / Swing Long / Swing Short / Range Play]
+WHAT TO DO — [Buy / Sell / Hold]
+⚡ Option A — Long Call / Long Put
+📊 Option B — Bull Call Spread / Bear Put Spread  ← Recommended
+💰 Option C — Bull Put Credit Spread / Bear Call Credit Spread
+Est. Win Rate: 67% (Moderate-High)
 ```
 
 ---
@@ -252,7 +274,7 @@ WHAT TO DO  [Buy / Sell / Hold / Swing Long / Swing Short / Range Play]
 | Market Data | Alpaca API (bars, quotes, WebSocket) · Finnhub (insider, earnings, analysts) |
 | Screener Data | Yahoo Finance (gainers/losers, most active, symbol search) |
 | AI Providers | Ollama · OpenAI · Anthropic · Google Gemini |
-| Frontend | HTML · CSS · Vanilla JavaScript |
+| Frontend | HTML · CSS · Vanilla JavaScript · TradingView widget |
 | Persistence | `~/.alphaquant/prefs.json` (server-side) |
 
 ---

@@ -22,15 +22,17 @@ body {
     height: 100dvh;
     color: var(--text-dark);
     overflow: hidden;
+    padding: 0 4px;
+    box-sizing: border-box;
 }
 
 .chat-container {
-    width: 96%;
-    max-width: 1500px;
-    height: 94dvh;
+    width: 99%;
+    max-width: 1700px;
+    height: 98dvh;
     background-color: var(--bg-chat);
-    border-radius: 12px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -39,38 +41,41 @@ body {
 header {
     background-color: var(--header-bg);
     color: var(--text-light);
-    padding: 16px 20px;
+    padding: 9px 18px 0;
     text-align: center;
-    font-size: 1.2rem;
+    font-size: 1.1rem;
     font-weight: 600;
     letter-spacing: 0.5px;
     box-shadow: 0 2px 10px rgba(0,0,0,0.1);
     z-index: 10;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
 }
 
 .subtitle {
-    font-size: 0.8rem;
+    font-size: 0.72rem;
     font-weight: 400;
-    opacity: 0.8;
-    margin-top: 4px;
+    opacity: 0.75;
+    margin-top: 1px;
 }
 
 #chat-window {
     flex-grow: 1;
-    padding: 24px;
+    padding: 14px 18px;
     overflow-y: auto;
-    overflow-x: hidden; 
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 10px;
     background-color: var(--bg-chat);
 }
 
 .message {
     max-width: 100%;
-    padding: 12px 16px;
-    border-radius: 12px;
-    line-height: 1.55;
+    padding: 10px 14px;
+    border-radius: 10px;
+    line-height: 1.5;
     font-size: 0.92rem;
     font-weight: 400;
     animation: fadeIn 0.3s ease-in-out;
@@ -134,6 +139,8 @@ header {
 .trade-card.swing-long  { border-left-color: #17a2b8; background-color: rgba(23,162,184,0.06); }
 .trade-card.swing-short { border-left-color: #6f42c1; background-color: rgba(111,66,193,0.06); }
 .trade-card.swing-range { border-left-color: #fd7e14; background-color: rgba(253,126,20,0.06); }
+.trade-card.alt-buy  { border-left-color: #28a745; background-color: rgba(40,167,69,0.03); opacity: 0.82; border-style: dashed; }
+.trade-card.alt-bear { border-left-color: #dc3545; background-color: rgba(220,53,69,0.03); opacity: 0.82; border-style: dashed; }
 
 .message.agent hr {
     margin: 12px 0;
@@ -177,11 +184,12 @@ tr:nth-child(even) { background-color: #fcfcfc; }
 
 .control-panel {
     display: flex;
-    padding: 12px 20px;
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    padding: 8px 16px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
     background-color: var(--bg-chat);
     border-top: 1px solid var(--border-light);
-    gap: 12px;
+    gap: 10px;
+    flex-shrink: 0;
 }
 
 .input-wrapper {
@@ -192,7 +200,7 @@ tr:nth-child(even) { background-color: #fcfcfc; }
 input[type="text"] {
     width: 100%;
     box-sizing: border-box;
-    padding: 14px 20px;
+    padding: 10px 18px;
     border: 1px solid #ced4da;
     border-radius: 30px;
     font-size: 1rem; /* ≥16px prevents iOS auto-zoom on focus */
@@ -279,23 +287,65 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 
 .suggestion-chips {
     display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px 20px 0;
-    background-color: var(--bg-chat);
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 7px 0 8px;
+    background-color: transparent;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.2) transparent;
+    flex-shrink: 0;
+    border-top: 1px solid rgba(255,255,255,0.12);
+    margin-top: 8px;
 }
+.suggestion-chips::-webkit-scrollbar { height: 3px; }
+.suggestion-chips::-webkit-scrollbar-track { background: transparent; }
+.suggestion-chips::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 2px; }
+
+/* ── Conversation context bar ───────────────────────────────────────────── */
+.context-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 6px 20px 0;
+    padding: 5px 12px;
+    background: rgba(40, 167, 69, 0.10);
+    border: 1px solid rgba(40, 167, 69, 0.30);
+    border-radius: 8px;
+    font-size: 0.78rem;
+    color: var(--text-dark);
+}
+.ctx-label { flex: 1; }
+.ctx-label b { color: #28a745; }
+.ctx-clear {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    color: #888;
+    padding: 0 2px;
+}
+.ctx-clear:hover { color: #dc3545; }
+[data-theme="dark"] .context-bar {
+    background: rgba(72, 187, 120, 0.08);
+    border-color: rgba(72, 187, 120, 0.25);
+}
+[data-theme="dark"] .ctx-label b { color: #68d391; }
 
 .chip {
-    background-color: transparent;
-    color: var(--primary-green);
-    border: 1px solid #ced4da;
-    padding: 6px 14px;
+    background-color: rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.88);
+    border: 1px solid rgba(255,255,255,0.22);
+    padding: 4px 11px;
     border-radius: 20px;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-weight: 500;
     cursor: pointer;
     transition: background-color 0.15s, border-color 0.15s, color 0.15s;
     white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .chip:hover:not(:disabled) {
@@ -305,6 +355,9 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 }
 
 .chip:disabled { opacity: 0.45; cursor: not-allowed; }
+.chip-greyed { opacity: 0.35; cursor: default; pointer-events: none; }
+.chip-journal { background-color: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.18); color: rgba(255,255,255,0.6); }
+.chip-journal:hover:not(:disabled) { background-color: #4a5568; border-color: #4a5568; color: #fff; }
 
 /* ── Bubble price strip (inside each agent response) ──── */
 .bubble-strip {
@@ -437,7 +490,8 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 .conn-dot-red   { background: #ff6b6b; box-shadow: 0 0 5px rgba(255,77,77,0.5); }
 .conn-dot-yellow { background: #ffc107; }
 .settings-btn,
-.theme-btn {
+.theme-btn,
+.clear-chat-btn {
     background: rgba(255,255,255,0.15);
     color: #fff;
     border: 1px solid rgba(255,255,255,0.3);
@@ -450,6 +504,7 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 }
 .settings-btn:hover,
 .theme-btn:hover { background: rgba(255,255,255,0.28); }
+.clear-chat-btn:hover { background: rgba(220,53,69,0.35); border-color: rgba(220,53,69,0.6); }
 
 /* ── Settings modal ──────────────────────────────────────────────────── */
 .modal-overlay {
@@ -681,7 +736,7 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 
     .subtitle { font-size: 0.66rem; margin-top: 2px; }
 
-    #chat-window { padding: 10px 8px; gap: 10px; }
+    #chat-window { padding: 8px 8px; gap: 8px; }
 
     .message {
         padding: 10px 12px;
@@ -696,17 +751,17 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
         line-height: 1.6;
     }
 
-    .suggestion-chips { padding: 6px 8px 0; gap: 5px; }
+    .suggestion-chips { padding: 5px 0 6px; gap: 5px; }
 
-    .chip { font-size: 0.72rem; padding: 5px 10px; }
+    .chip { font-size: 0.72rem; padding: 4px 9px; }
 
     .control-panel {
-        padding: 8px 10px;
-        padding-bottom: max(8px, env(safe-area-inset-bottom));
-        gap: 8px;
+        padding: 6px 8px;
+        padding-bottom: max(6px, env(safe-area-inset-bottom));
+        gap: 6px;
     }
 
-    input[type="text"] { padding: 11px 16px; }
+    input[type="text"] { padding: 9px 14px; }
 
     button { padding: 0 16px; font-size: 0.88rem; min-width: 60px; }
 
@@ -722,10 +777,10 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 /* ── App layout wrapper (sidebar + chat) ─────────────────────────────────── */
 .app-layout {
     display: flex;
-    width: 96%;
-    max-width: 1500px;
-    height: 94dvh;
-    gap: 10px;
+    width: 99%;
+    max-width: 1700px;
+    height: 98dvh;
+    gap: 8px;
     align-items: stretch;
 }
 
@@ -739,7 +794,7 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 
 /* ── Watchlist sidebar ───────────────────────────────────────────────────── */
 .watchlist-sidebar {
-    width: 210px;
+    width: 220px;
     flex-shrink: 0;
     background: var(--bg-chat);
     border-radius: 12px;
@@ -933,8 +988,51 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 }
 .wl-refresh-btn:hover { background: #d4f5e0; }
 
+.wl-scan-btn {
+    background: rgba(40,167,69,0.1);
+    border: 1px solid rgba(40,167,69,0.35);
+    border-radius: 4px;
+    color: var(--primary-green);
+    padding: 2px 7px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+}
+.wl-scan-btn:hover { background: rgba(40,167,69,0.22); }
+
+/* ── Ticker badge — prepended to each single-stock analysis ─────────────── */
+.ticker-badge {
+    display: inline-block;
+    background: var(--primary-green);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 2px 9px;
+    border-radius: 10px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+    transition: opacity 0.15s;
+}
+.ticker-badge:hover { opacity: 0.82; }
+
+/* ── Best Play card — scanner recommendation block ──────────────────────── */
+.best-play-card {
+    margin-top: 10px;
+    padding: 10px 14px;
+    background: rgba(40,167,69,0.07);
+    border: 1px solid rgba(40,167,69,0.25);
+    border-left: 3px solid var(--primary-green);
+    border-radius: 6px;
+    font-size: 0.9rem;
+    line-height: 1.6;
+}
+
 /* ── Mobile: sidebar becomes a compact horizontal strip ──────────────────── */
 @media (max-width: 768px) {
+    body { padding: 0; }
     .app-layout {
         flex-direction: column;
         width: 100%;
@@ -1036,10 +1134,8 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 [data-theme="dark"] .message.agent hr { border-top-color: #2d3748; }
 
 [data-theme="dark"] .control-panel { background-color: var(--bg-chat); border-top-color: #2d3748; }
-[data-theme="dark"] .suggestion-chips { background-color: var(--bg-chat); }
+[data-theme="dark"] .suggestion-chips { border-color: rgba(255,255,255,0.1); }
 
-[data-theme="dark"] .chip { border-color: #4a5568; color: #68d391; }
-[data-theme="dark"] .chip:hover:not(:disabled) { background-color: #1a5c2e; border-color: #1a5c2e; color: #fff; }
 
 [data-theme="dark"] input[type="text"] {
     background-color: #2d3748;
@@ -1079,6 +1175,9 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 [data-theme="dark"] .wl-interval-sel { border-color: #4a5568; color: #e2e8f0; }
 [data-theme="dark"] .wl-refresh-btn { border-color: #4a5568; color: #68d391; }
 [data-theme="dark"] .wl-refresh-btn:hover { background: #1a3d28; }
+[data-theme="dark"] .wl-scan-btn { border-color: rgba(72,187,120,0.35); color: #68d391; }
+[data-theme="dark"] .wl-scan-btn:hover { background: rgba(72,187,120,0.18); }
+[data-theme="dark"] .best-play-card { background: rgba(72,187,120,0.07); border-color: rgba(72,187,120,0.25); border-left-color: #68d391; }
 [data-theme="dark"] .watchlist-sidebar input[type="text"] { background-color: #2d3748; border-color: #4a5568; color: #e2e8f0; }
 [data-theme="dark"] .wl-add-btn:hover:not(:disabled) { background: #2d8a4e; }
 
@@ -1180,3 +1279,84 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
     border-right-color: transparent;
     border-left-color: #1a4d28;
 }
+
+/* ── TradingView chart widget ─────────────────────────────── */
+.tv-chart-wrap {
+    margin-top: 14px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #e2e8f0;
+}
+.tv-chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: #f8f9fa;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #495057;
+    border-bottom: 1px solid #e2e8f0;
+}
+.tv-toggle-btn {
+    background: rgba(0,165,80,0.08);
+    border: 1px solid rgba(0,165,80,0.3);
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--primary-green);
+    padding: 2px 8px;
+    transition: background 0.15s;
+    white-space: nowrap;
+}
+.tv-toggle-btn:hover { background: rgba(0,165,80,0.18); }
+.tradingview-widget-container { height: 300px; }
+[data-theme="dark"] .tv-chart-wrap { border-color: #2d3748; }
+[data-theme="dark"] .tv-chart-header { background: #1e2433; color: #a0aec0; border-color: #2d3748; }
+[data-theme="dark"] .tv-toggle-btn { background: rgba(72,187,120,0.1); border-color: rgba(72,187,120,0.3); color: #68d391; }
+[data-theme="dark"] .tv-toggle-btn:hover { background: rgba(72,187,120,0.22); }
+
+/* ── Track button ─────────────────────────────────────────── */
+.track-btn-wrap {
+    margin-top: 10px;
+}
+.track-btn {
+    background: transparent;
+    border: 1px solid #6c757d;
+    color: #6c757d;
+    border-radius: 16px;
+    padding: 4px 14px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.track-btn:hover:not(:disabled) { background: #6c757d; color: #fff; }
+.track-btn:disabled { opacity: 0.6; }
+
+/* ── Journal styles ───────────────────────────────────────── */
+.journal-analyze-btn {
+    background: transparent;
+    border: 1px solid var(--primary-green);
+    color: var(--primary-green);
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+.journal-analyze-btn:hover { background: var(--primary-green); color: #fff; }
+.journal-clear-btn {
+    background: transparent;
+    border: 1px solid #dc3545;
+    color: #dc3545;
+    border-radius: 16px;
+    padding: 4px 14px;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+.journal-clear-btn:hover { background: #dc3545; color: #fff; }
+
+[data-theme="dark"] .track-btn { border-color: #a0aec0; color: #a0aec0; }
+[data-theme="dark"] .track-btn:hover:not(:disabled) { background: #a0aec0; color: #1a202c; }
+[data-theme="dark"] .chip-journal { border-color: #a0aec0; color: #a0aec0; }
+[data-theme="dark"] .chip-journal:hover:not(:disabled) { background: #4a5568; color: #fff; }

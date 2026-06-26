@@ -44,6 +44,45 @@ const TICKER_BLOCKLIST = new Set([
     'EBIT','EBITDA','GAAP','ROIC','NII','NIM','BPS','PPS','ATM','ITM','OTM'
 ]);
 
+// ── Conversation context tracking ────────────────────────────────────────
+let lastAnalyzedTicker = null;
+
+function isLikelyScannerQuery(text) {
+    return /\b(scan|scanner|bullish|bearish|pre.?market|premarket|wheel|movers|gainers|losers|most.?active|trending|gap.?up|gap.?down|gapping|swing.?scan|swing.?play|market.?scan|sector.?rotation|sector.?scan|sector.?etf|where.?is.?money|which.?sector|top.?sector|best.?sector|squeeze|earnings.?play|pre.?earnings|failed.?breakdown|reversal.?setup|snap.?back)\b/i.test(text);
+}
+
+function updateContextIndicator() {
+    const bar = document.getElementById('contextBar');
+    if (!bar) return;
+    if (lastAnalyzedTicker) {
+        bar.innerHTML = `<span class="ctx-label">Context: <b>${lastAnalyzedTicker}</b> — follow-up questions will refer to this stock</span><button class="ctx-clear" onclick="clearContext()" title="Clear context">×</button>`;
+        bar.style.display = 'flex';
+    } else {
+        bar.style.display = 'none';
+    }
+}
+
+function clearContext() {
+    lastAnalyzedTicker = null;
+    updateContextIndicator();
+}
+
+function clearChat() {
+    if (activeAbortController) activeAbortController.abort();
+    lastAnalyzedTicker = null;
+    activeStrip = null;
+    lastAgentMsg = null;
+    const chatWindow = document.getElementById('chat-window');
+    chatWindow.innerHTML = '<div class="message agent">Hello! I am your AI-Powered Trading Agent. Ask me for live stock prices, multi-timeframe analysis, or a detailed trade plan for any US equity.</div>';
+    updateContextIndicator();
+    const inputEl = document.getElementById('commandInput');
+    const sendBtn = document.getElementById('sendButton');
+    inputEl.disabled = false;
+    sendBtn.textContent = 'Send';
+    sendBtn.onclick = dispatchCommand;
+    setChipsDisabled(false);
+}
+
 function extractAllTickers(text) {
     const seen = new Set(), result = [];
     const re = /\b([A-Z]{1,5})\s*\(\$[\d,]+\.?\d{0,2}\)/g;
@@ -171,10 +210,10 @@ function activateBubbleStrip(agentMsg, tickers) {
         `<span class="bsc-time"></span>` +
         `<select class="bsc-select">` +
             `<option value="0">Off</option>` +
+            `<option value="15" selected>15s</option>` +
             `<option value="30">30s</option>` +
-            `<option value="60" selected>1m</option>` +
+            `<option value="60">1m</option>` +
             `<option value="120">2m</option>` +
-            `<option value="300">5m</option>` +
         `</select>` +
         `<button class="bsc-btn" title="Refresh now">⟳</button>`;
     strip.appendChild(ctrl);
@@ -195,7 +234,7 @@ function activateBubbleStrip(agentMsg, tickers) {
     activeStrip  = strip;
     lastAgentMsg = agentMsg;
     doRefresh();                                              // immediate
-    refreshTimerId = setInterval(doRefresh, 60 * 1000);      // default 1m
+    refreshTimerId = setInterval(doRefresh, 15 * 1000);      // default 15s
 }
 
 async function refreshAllCells(strip, msgEl) {
@@ -212,7 +251,10 @@ async function refreshAllCells(strip, msgEl) {
 
 async function refreshCell(cell, ticker, msgEl) {
     try {
-        const res  = await fetch(`/api/price/${encodeURIComponent(ticker)}`);
+        const ctrl = new AbortController();
+        const tid  = setTimeout(() => ctrl.abort(), 5000);
+        const res  = await fetch(`/api/price/${encodeURIComponent(ticker)}`, { signal: ctrl.signal });
+        clearTimeout(tid);
         if (!res.ok) return;
         const data = await res.json();
         if (data.price <= 0) return;
@@ -373,6 +415,25 @@ async function dispatchCommand() {
     if (activeAbortController) activeAbortController.abort();
     activeAbortController = new AbortController();
 
+    // Detect ticker in this message before clearing the input
+    const detectedTicker  = detectTickerFromInput(rawText);
+    const scannerQuery    = isLikelyScannerQuery(rawText);
+
+    // Update context: scanner queries clear it, new ticker updates it
+    if (scannerQuery) {
+        lastAnalyzedTicker = null;
+    } else if (detectedTicker) {
+        lastAnalyzedTicker = detectedTicker;
+    }
+    updateContextIndicator();
+
+    // Message sent to server: inject last ticker context for follow-up questions
+    // (user sees their original text; the appended context is invisible to them)
+    let messageToSend = rawText;
+    if (!detectedTicker && !scannerQuery && lastAnalyzedTicker) {
+        messageToSend = `${rawText} (referring to ${lastAnalyzedTicker})`;
+    }
+
     inputEl.value    = '';
     inputEl.disabled = true;
     sendBtn.textContent = 'Cancel';
@@ -404,7 +465,7 @@ async function dispatchCommand() {
         const response = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ input: rawText }),
+            body: JSON.stringify({ input: messageToSend }),
             signal: activeAbortController.signal
         });
         if (!response.ok) throw new Error('Server rejected the request.');
@@ -447,7 +508,6 @@ async function dispatchCommand() {
             wrapTables(agentMsg);
         }
         chatWindow.scrollTop = chatWindow.scrollHeight;
-        renderPending  = false;
         streamComplete = true;
 
         let tickers = extractAllTickers(finalOutputString);
@@ -455,7 +515,17 @@ async function dispatchCommand() {
             const t = detectTickerFromInput(rawText);
             if (t) tickers = [t];
         }
-        if (tickers.length) activateBubbleStrip(agentMsg, tickers);
+        if (tickers.length) {
+            activateBubbleStrip(agentMsg, tickers);
+            // Update context to the stock the response was about
+            if (!scannerQuery) {
+                lastAnalyzedTicker = tickers[0];
+                updateContextIndicator();
+                injectTickerBadge(tickers[0], agentMsg);
+                injectTradingViewWidget(tickers[0], agentMsg);
+                injectTrackButton(tickers[0], agentMsg, finalOutputString);
+            }
+        }
 
     } catch (error) {
         if (error.name === 'AbortError') {
@@ -857,7 +927,7 @@ setInterval(async () => {
 // ── Watchlist / Favorites ─────────────────────────────────────────────────
 const WL_KEY       = 'alphaquant_watchlist';   // localStorage fallback keys
 const WL_NAMES_KEY = 'alphaquant_wl_names';
-const WL_MAX       = 10;
+const WL_MAX       = 15;
 
 let wlFavorites    = [];
 let wlNames        = {};
@@ -1054,6 +1124,25 @@ async function refreshWatchlist() {
     }
 }
 
+function scanWatchlist() {
+    if (!wlFavorites.length) {
+        alert('Your watchlist is empty. Add some stocks first.');
+        return;
+    }
+    const batch = wlFavorites.slice(0, 8);
+    // Pass only tickers — appending a human-readable note would inject words like "TOP","API","LIMIT"
+    // into the intent tag ticker extractor, polluting the scan request.
+    submitChip('scan my watchlist ' + batch.join(' '));
+    if (wlFavorites.length > 8) {
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:0.8em;color:#6c757d;margin-top:4px;text-align:center';
+        note.textContent = `Scanning top 8 of ${wlFavorites.length} — API rate limit`;
+        const chatWindow = document.getElementById('chat-window');
+        chatWindow.appendChild(note);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+}
+
 function setWlInterval(secs) {
     if (wlRefreshTimer) clearInterval(wlRefreshTimer);
     wlRefreshTimer = null;
@@ -1064,6 +1153,8 @@ function setWlInterval(secs) {
 function analyzeWatchlistStock(sym) {
     const inputEl = document.getElementById('commandInput');
     if (!inputEl) return;
+    lastAnalyzedTicker = sym;
+    updateContextIndicator();
     inputEl.value = `analyze ${sym}`;
     hideSuggestions();
     dispatchCommand();
@@ -1164,7 +1255,202 @@ async function initPrefs() {
     setWlInterval(30);
 }
 
+// ── Context-aware chip greying ────────────────────────────────────────────
+
+async function initChipState() {
+    try {
+        const res = await fetch('/api/market/clock');
+        if (!res.ok) return;
+        const clock = await res.json();
+        const isOpen = clock.is_open;
+        const etHour = clock.et_hour;
+
+        const preMarketChip = document.getElementById('chip-premarket');
+        const gapPlaysChip  = document.getElementById('chip-gapplays');
+
+        if (isOpen && preMarketChip) {
+            preMarketChip.classList.add('chip-greyed');
+            preMarketChip.title = 'Market is open — pre-market scan is for before 9:30 AM ET';
+        }
+        if ((isOpen && etHour >= 11) && gapPlaysChip) {
+            gapPlaysChip.classList.add('chip-greyed');
+            gapPlaysChip.title = 'Gap plays are most relevant before 11 AM ET';
+        }
+    } catch (e) { /* ignore — chips stay active */ }
+}
+
+// ── TradingView chart widget ──────────────────────────────────────────────
+
+let tvChartCounter = 0;
+
+function injectTickerBadge(ticker, container) {
+    if (!ticker) return;
+    if (container.querySelector('.ticker-badge')) return;
+    const badge = document.createElement('span');
+    badge.className = 'ticker-badge';
+    badge.textContent = ticker;
+    badge.onclick = () => submitChip(`analyze ${ticker}`);
+    container.insertBefore(badge, container.firstChild);
+}
+
+function injectTradingViewWidget(ticker, container) {
+    if (!ticker) return;
+    const existing = container.querySelector('.tv-chart-wrap');
+    if (existing) existing.remove();
+
+    const chartId = 'tv_chart_' + (++tvChartCounter);
+    const isDark  = document.documentElement.getAttribute('data-theme') === 'dark';
+
+    const wrap = document.createElement('div');
+    wrap.className = 'tv-chart-wrap tv-collapsed';
+
+    const header = document.createElement('div');
+    header.className = 'tv-chart-header';
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'tv-toggle-btn';
+    toggleBtn.textContent = '＋ Chart';
+    let chartInitialized = false;
+    const init = () => {
+        if (typeof TradingView === 'undefined' || typeof TradingView.widget === 'undefined') {
+            setTimeout(init, 200);
+            return;
+        }
+        try {
+            new TradingView.widget({
+                container_id:       chartId,
+                autosize:           true,
+                height:             300,
+                symbol:             ticker,
+                interval:           'D',
+                timezone:           'America/New_York',
+                theme:              isDark ? 'dark' : 'light',
+                style:              '1',
+                locale:             'en',
+                hide_top_toolbar:   false,
+                hide_legend:        false,
+                hide_side_toolbar:  true,
+                allow_symbol_change: false,
+                save_image:         false,
+                studies:            ['RSI@tv-basicstudies', 'MACD@tv-basicstudies'],
+                show_popup_button:  true,
+                popup_width:        '1000',
+                popup_height:       '650'
+            });
+        } catch (e) { /* ignore if blocked */ }
+    };
+
+    const headerLabel = document.createElement('span');
+    headerLabel.textContent = `📈 ${ticker} — Daily Chart`;
+    header.appendChild(headerLabel);
+    header.appendChild(toggleBtn);
+
+    const chartDiv = document.createElement('div');
+    chartDiv.id    = chartId;
+    chartDiv.style.height = '0';
+    chartDiv.style.overflow = 'hidden';
+    chartDiv.style.transition = 'height 0.2s ease';
+
+    wrap.appendChild(header);
+    wrap.appendChild(chartDiv);
+    container.appendChild(wrap);
+
+    toggleBtn.onclick = () => {
+        const expanding = chartDiv.style.height === '0px' || chartDiv.style.height === '0';
+        if (expanding) {
+            chartDiv.style.height = '300px';
+            chartDiv.style.overflow = '';
+            toggleBtn.textContent = '▾ Chart';
+            if (!chartInitialized) {
+                chartInitialized = true;
+                init();
+            }
+        } else {
+            chartDiv.style.height = '0';
+            chartDiv.style.overflow = 'hidden';
+            toggleBtn.textContent = '＋ Chart';
+        }
+    };
+}
+
+// ── Track button + Journal ────────────────────────────────────────────────
+
+function injectTrackButton(ticker, container, responseText) {
+    if (!ticker) return;
+    const existing = container.querySelector('.track-btn-wrap');
+    if (existing) existing.remove();
+    const wrap = document.createElement('div');
+    wrap.className = 'track-btn-wrap';
+    const btn = document.createElement('button');
+    btn.className = 'track-btn';
+    btn.textContent = '📌 Track this trade';
+    btn.onclick = () => trackTrade(ticker, responseText, btn);
+    wrap.appendChild(btn);
+    container.appendChild(wrap);
+}
+
+async function trackTrade(ticker, responseText, btnEl) {
+    const priceMatch = responseText.match(/\$(\d+(?:\.\d+)?)/);
+    const price = priceMatch ? priceMatch[1] : '';
+    const verdictMatch = responseText.match(/EXECUTE_CALL|PREPARE_LONG|STAND_DOWN|EXECUTE_PUT|PREPARE_SHORT/);
+    const verdict = verdictMatch ? verdictMatch[0] : 'TRACKED';
+    const stratMatch = responseText.match(/Iron Condor|Bull Call|Bear Put|Credit Spread|Debit Spread/);
+    const strategy = stratMatch ? stratMatch[0] : '';
+    try {
+        const res = await fetch('/api/journal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticker, price, verdict, strategy, date: new Date().toISOString().slice(0, 10) })
+        });
+        if (res.ok) {
+            if (btnEl) { btnEl.textContent = '✅ Tracked!'; btnEl.disabled = true; }
+        }
+    } catch (e) {
+        if (btnEl) { btnEl.textContent = '❌ Failed'; }
+    }
+}
+
+async function viewJournal() {
+    const chatWindow = document.getElementById('chat-window');
+    const journalMsg = document.createElement('div');
+    journalMsg.className = 'message agent';
+    journalMsg.innerHTML = '<span class="loading-text">Loading journal...</span>';
+    chatWindow.appendChild(journalMsg);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    try {
+        const res = await fetch('/api/journal');
+        const entries = await res.json();
+        if (!entries.length) {
+            journalMsg.innerHTML = '<b>📓 Trade Journal</b><br>No tracked trades yet. Click <b>📌 Track this trade</b> on any stock analysis to save it here.';
+        } else {
+            let html = `<b>📓 Trade Journal</b> — ${entries.length} tracked trade${entries.length > 1 ? 's' : ''}<br><br>`;
+            html += `<table><tr><th>Date</th><th>Ticker</th><th>Price</th><th>Verdict</th><th>Strategy</th><th></th></tr>`;
+            entries.forEach((e, i) => {
+                html += `<tr>
+                  <td>${e.date || ''}</td>
+                  <td><b>${e.ticker || ''}</b></td>
+                  <td>${e.price ? '$' + e.price : '—'}</td>
+                  <td>${e.verdict || '—'}</td>
+                  <td>${e.strategy || '—'}</td>
+                  <td><button class="journal-analyze-btn" onclick="submitChip('analyze ${e.ticker}')">Analyze</button></td>
+                </tr>`;
+            });
+            html += `</table><br><button class="journal-clear-btn" onclick="clearJournal()">🗑 Clear All</button>`;
+            journalMsg.innerHTML = sanitizeLlmOutput(html);
+            wrapTables(journalMsg);
+        }
+    } catch (e) {
+        journalMsg.innerHTML = '<span class="error-text">Could not load journal.</span>';
+    }
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+}
+
+async function clearJournal() {
+    await fetch('/api/journal', { method: 'DELETE' });
+    viewJournal();
+}
+
 autoConnect();
 // Apply theme from localStorage immediately (fast path before server responds)
 applyTheme(localStorage.getItem(THEME_KEY) || 'light');
 initPrefs();
+initChipState();

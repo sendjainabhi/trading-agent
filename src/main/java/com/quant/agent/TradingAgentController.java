@@ -39,6 +39,7 @@ public class TradingAgentController {
     private final TradingAgentService tradingAgentService;
     private final AlpacaStreamService alpacaStreamService;
     private final UserPrefsService    userPrefsService;
+    private final MarketClockService  marketClockService;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -46,10 +47,12 @@ public class TradingAgentController {
 
     public TradingAgentController(TradingAgentService tradingAgentService,
                                   AlpacaStreamService alpacaStreamService,
-                                  UserPrefsService userPrefsService) {
+                                  UserPrefsService userPrefsService,
+                                  MarketClockService marketClockService) {
         this.tradingAgentService = tradingAgentService;
         this.alpacaStreamService = alpacaStreamService;
         this.userPrefsService    = userPrefsService;
+        this.marketClockService  = marketClockService;
     }
 
     // 15-second TTL cache — prevents hammering Yahoo Finance on every UI refresh tick
@@ -193,6 +196,46 @@ public class TradingAgentController {
         } catch (Exception e) {
             return Map.of("success", false, "error", "Invalid config file: " + e.getMessage());
         }
+    }
+
+    // ── Market clock ─────────────────────────────────────────────────────────
+
+    @GetMapping("/api/market/clock")
+    public Map<String, Object> getMarketClock() {
+        MarketClockService.Session session = marketClockService.getCurrentSession();
+        int etHour = java.time.ZonedDateTime.now(ET).getHour();
+        return Map.of(
+                "session",  session.name(),
+                "is_open",  session == MarketClockService.Session.REGULAR,
+                "et_hour",  etHour,
+                "label",    marketClockService.toPlainEnglish()
+        );
+    }
+
+    // ── Recommendation journal ────────────────────────────────────────────────
+
+    @GetMapping("/api/journal")
+    public List<Map<String, String>> getJournal() {
+        return userPrefsService.getJournal();
+    }
+
+    @PostMapping("/api/journal")
+    public Map<String, Object> addJournalEntry(@RequestBody Map<String, String> entry) {
+        if (entry == null || entry.getOrDefault("ticker", "").isBlank()) {
+            return Map.of("success", false, "error", "ticker required");
+        }
+        Map<String, String> safeEntry = new HashMap<>(entry);
+        if (!safeEntry.containsKey("date")) {
+            safeEntry.put("date", java.time.LocalDate.now().toString());
+        }
+        userPrefsService.addJournalEntry(safeEntry);
+        return Map.of("success", true);
+    }
+
+    @DeleteMapping("/api/journal")
+    public Map<String, Object> clearJournal() {
+        userPrefsService.clearJournal();
+        return Map.of("success", true);
     }
 
     // ── Symbol search ─────────────────────────────────────────────────────────

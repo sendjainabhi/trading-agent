@@ -127,6 +127,60 @@ public final class IndicatorUtils {
         }
     }
 
+    // ── Offset-based helpers for divergence and direction detection ───────────
+
+    /**
+     * RSI computed against bars[0..size-1-offset], allowing comparison
+     * of current RSI vs RSI N bars ago to detect momentum divergence.
+     */
+    public static double calculateRsiAtOffset(JsonNode bars, int period, int offset) {
+        int len = bars.size() - offset;
+        if (len < period + 1) return 50.0;
+        double gains = 0, losses = 0;
+        for (int i = len - period; i < len; i++) {
+            double diff = bars.get(i).path("c").asDouble() - bars.get(i - 1).path("c").asDouble();
+            if (diff > 0) gains += diff; else losses -= diff;
+        }
+        double avgGain = gains / period, avgLoss = losses / period;
+        if (avgLoss < 0.0001) return avgGain > 0 ? 95.0 : 50.0;
+        return 100.0 - (100.0 / (1.0 + avgGain / avgLoss));
+    }
+
+    /**
+     * ADX computed against bars[0..size-1-offset], allowing comparison of
+     * current ADX vs ADX N bars ago to determine if trend is strengthening or exhausting.
+     */
+    public static double calculateAdxAtOffset(JsonNode bars, int period, int offset) {
+        int len = bars.size() - offset;
+        if (len < period * 2 + 1) return 25.0;
+        double[] tr = new double[len], pdm = new double[len], mdm = new double[len];
+        for (int i = 1; i < len; i++) {
+            double h = bars.get(i).path("h").asDouble(), l = bars.get(i).path("l").asDouble();
+            double prevH = bars.get(i - 1).path("h").asDouble();
+            double prevL = bars.get(i - 1).path("l").asDouble();
+            double prevC = bars.get(i - 1).path("c").asDouble();
+            tr[i]  = Math.max(h - l, Math.max(Math.abs(h - prevC), Math.abs(l - prevC)));
+            double up = h - prevH, down = prevL - l;
+            pdm[i] = (up > down && up > 0)   ? up   : 0;
+            mdm[i] = (down > up && down > 0) ? down : 0;
+        }
+        double tr14 = 0, pdm14 = 0, mdm14 = 0;
+        for (int i = 1; i <= period; i++) { tr14 += tr[i]; pdm14 += pdm[i]; mdm14 += mdm[i]; }
+        double pdi = tr14 > 0 ? 100.0 * pdm14 / tr14 : 0;
+        double mdi = tr14 > 0 ? 100.0 * mdm14 / tr14 : 0;
+        double adx = (pdi + mdi) > 0 ? 100.0 * Math.abs(pdi - mdi) / (pdi + mdi) : 0;
+        for (int i = period + 1; i < len; i++) {
+            tr14  = tr14  - (tr14  / period) + tr[i];
+            pdm14 = pdm14 - (pdm14 / period) + pdm[i];
+            mdm14 = mdm14 - (mdm14 / period) + mdm[i];
+            pdi = tr14 > 0 ? 100.0 * pdm14 / tr14 : 0;
+            mdi = tr14 > 0 ? 100.0 * mdm14 / tr14 : 0;
+            double dx = (pdi + mdi) > 0 ? 100.0 * Math.abs(pdi - mdi) / (pdi + mdi) : 0;
+            adx = ((adx * (period - 1)) + dx) / period;
+        }
+        return adx;
+    }
+
     // ── Score utilities ───────────────────────────────────────────────────────
 
     /** Clamps a raw value (scaled by {@code scaleFactor}) into the [-100, +100] range. */

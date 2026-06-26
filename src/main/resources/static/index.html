@@ -17,7 +17,10 @@
 <aside class="watchlist-sidebar" id="watchlistSidebar">
     <div class="wl-header">
         <span class="wl-title">⭐ Watchlist</span>
-        <span class="wl-count" id="wlCount">0/10</span>
+        <div style="display:flex;align-items:center;gap:6px">
+            <span class="wl-count" id="wlCount">0/15</span>
+            <button class="wl-scan-btn" onclick="scanWatchlist()" title="Scan all watchlist stocks">📊 Scan</button>
+        </div>
     </div>
     <div class="wl-add-row">
         <input type="text" id="wlInput" placeholder="Ticker or name…"
@@ -52,9 +55,24 @@
                     <span class="conn-dot conn-dot-red" id="connDot"></span>
                     <span class="header-model-label" id="headerModelLabel">connecting…</span>
                 </div>
+                <button class="clear-chat-btn" onclick="clearChat()" title="Clear chat">🗑</button>
                 <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle dark / light mode">🌙</button>
                 <button class="settings-btn" onclick="openSettingsModal()" title="Model Settings">⚙</button>
             </div>
+        </div>
+        <div class="suggestion-chips" id="chipBar">
+            <button class="chip" id="chip-premarket" onclick="submitChip('pre market movers')">🌅 Pre-Market</button>
+            <button class="chip" onclick="submitChip('scan the market and show top options plays')">📊 Market Scan</button>
+            <button class="chip" onclick="submitChip('what are the biggest bullish movers today?')">📈 Bullish</button>
+            <button class="chip" onclick="submitChip('what are the biggest bearish movers today?')">📉 Bearish</button>
+            <button class="chip" id="chip-gapplays" onclick="submitChip('what stocks are gapping up or down right now?')">⚡ Gap Plays</button>
+            <button class="chip" onclick="submitChip('swing trade setups')">🔄 Swing Plays</button>
+            <button class="chip" onclick="submitChip('wheel strategy scan')">🎡 Wheel Strategy</button>
+            <button class="chip" onclick="submitChip('sector rotation scan')">💹 Sector Rotation</button>
+            <button class="chip" onclick="submitChip('show me squeeze setups')">🔥 Squeeze</button>
+            <button class="chip" onclick="submitChip('earnings plays scan')">📅 Earnings Plays</button>
+            <button class="chip" onclick="submitChip('failed breakdown reversal setups')">↩️ Failed Breakdowns</button>
+            <button class="chip chip-journal" onclick="viewJournal()">📓 Journal</button>
         </div>
     </header>
 
@@ -64,16 +82,7 @@
         </div>
     </div>
 
-    <div class="suggestion-chips" id="chipBar">
-        <button class="chip" onclick="submitChip('pre market movers')">🌅 Pre-Market Movers</button>
-        <button class="chip" onclick="submitChip('scan the market and show top options plays')">📊 Market Scan</button>
-        <button class="chip" onclick="submitChip('wheel strategy scan')">🎡 Wheel Strategy</button>
-        <button class="chip" onclick="submitChip('what are the biggest bullish movers today?')">📈 Bullish Movers</button>
-        <button class="chip" onclick="submitChip('what are the biggest bearish movers today?')">📉 Bearish Movers</button>
-        <button class="chip" onclick="submitChip('what stocks are gapping up or down right now?')">⚡ Gap Plays</button>
-        <button class="chip" onclick="submitChip('what are the most active stocks with high volume?')">🔥 Most Active</button>
-        <button class="chip" onclick="submitChip('swing trade setups')">🔄 Swing Plays</button>
-    </div>
+    <div id="contextBar" class="context-bar" style="display:none"></div>
 
     <div class="control-panel">
         <div class="input-wrapper">
@@ -163,6 +172,7 @@
 <!-- Watchlist ticker search autocomplete -->
 <div id="wlSuggestions" class="wl-suggestions-popup" style="display:none"></div>
 
+<script type="text/javascript" src="https://s3.tradingview.com/tv.js" async></script>
 <script src="app.js"></script>
 </body>
 </html>

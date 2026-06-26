@@ -36,6 +36,9 @@ public class McpServerConfig {
     /** Used by scanner functions that require no input parameters. */
     public record EmptyRequest() {}
 
+    /** Used by watchlistScannerFunction — comma-separated ticker list. */
+    public record WatchlistRequest(String tickers) {}
+
     // ── Service injection ─────────────────────────────────────────────────────
 
     private final TechnicalAnalysisService analysisService;
@@ -138,6 +141,55 @@ public class McpServerConfig {
         return request -> {
             log.info("[TOOL] wheelStrategyScannerFunction called");
             return analysisService.scanWheelStrategy();
+        };
+    }
+
+    @Bean
+    @Description("USE THIS tool — and ONLY this tool — when the user asks about sector rotation, where money is flowing, which sectors are leading or lagging, sector momentum, or wants sector ETF rankings. Scans all 11 SPDR sector ETFs (XLK, XLF, XLE, XLI, XLV, XLC, XLY, XLP, XLB, XLRE, XLU) and ranks them by 1-week return, 1-month return, relative strength vs SPY, and volume trend.")
+    public Function<EmptyRequest, String> sectorRotationScannerFunction() {
+        return request -> {
+            log.info("[TOOL] sectorRotationScannerFunction called");
+            return analysisService.scanSectorRotation();
+        };
+    }
+
+    @Bean
+    @Description("USE THIS tool when the user asks about squeeze setups, volatility coils, stocks about to break out, low-ADX setups, or compression plays. Scans active stocks for ADX < 15 combined with low IV rank — signals a volatility squeeze where price is coiling before an imminent breakout.")
+    public Function<EmptyRequest, String> squeezeScannerFunction() {
+        return request -> {
+            log.info("[TOOL] squeezeScannerFunction called");
+            return analysisService.scanSqueeze();
+        };
+    }
+
+    @Bean
+    @Description("USE THIS tool when the user asks about earnings plays, stocks near earnings, pre-earnings setups, earnings volatility plays, or IV crush opportunities. Scans stocks 1–7 days before earnings with elevated IV rank > 40 to find prime pre-earnings volatility opportunities.")
+    public Function<EmptyRequest, String> earningsPlaysScannerFunction() {
+        return request -> {
+            log.info("[TOOL] earningsPlaysScannerFunction called");
+            return analysisService.scanEarningsPlays();
+        };
+    }
+
+    @Bean
+    @Description("USE THIS tool when the user asks to scan their watchlist or scan specific stocks by name. Takes a comma-separated list of ticker symbols, runs full multi-timeframe analysis on each, and returns results sorted by strongest signal. Apply SCANNER_TEMPLATE with the Best Play recommendation section.")
+    public Function<WatchlistRequest, String> watchlistScannerFunction() {
+        return request -> {
+            log.info("[TOOL] watchlistScannerFunction called — tickers={}", request.tickers());
+            try {
+                return analysisService.scanWatchlist(request.tickers());
+            } catch (Exception e) {
+                return "{\"error\":\"Watchlist scan failed: " + e.getMessage() + "\"}";
+            }
+        };
+    }
+
+    @Bean
+    @Description("USE THIS tool when the user asks about failed breakdowns, reversal setups, stocks at support that bounced, bullish divergence plays, or snap-back trades. Scans for stocks at swing support with bullish RSI divergence — price tested a low but momentum didn't confirm, signaling a reversal.")
+    public Function<EmptyRequest, String> failedBreakdownScannerFunction() {
+        return request -> {
+            log.info("[TOOL] failedBreakdownScannerFunction called");
+            return analysisService.scanFailedBreakdown();
         };
     }
 }
