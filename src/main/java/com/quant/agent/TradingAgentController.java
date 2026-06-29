@@ -87,7 +87,8 @@ public class TradingAgentController {
     @GetMapping("/api/price/{symbol}")
     public PriceResponse getPrice(@PathVariable String symbol) {
         String sym = symbol.toUpperCase().trim();
-        alpacaStreamService.subscribe(sym);
+        // Skip Alpaca WS subscription for futures/index symbols (e.g. ES=F, ^VIX)
+        if (!sym.contains("=") && !sym.startsWith("^")) alpacaStreamService.subscribe(sym);
 
         CachedPrice hit = priceCache.get(sym);
         if (hit != null && hit.fresh()) return hit.response();
@@ -135,6 +136,96 @@ public class TradingAgentController {
             log.warn("Price refresh failed for {}: {}", sym, e.getMessage());
         }
         return new PriceResponse(sym, 0.0, 0.0, 0.0, "--:--:--", "error");
+    }
+
+    // ── Market bar — TradingView scanner (stocks + futures) ──────────────────
+
+    // 5-second TTL matches the UI refresh interval
+    private record CachedBar(List<Map<String,Object>> data, long fetchedAt) {
+        boolean fresh() { return System.currentTimeMillis() - fetchedAt < 5_000; }
+    }
+    private volatile CachedBar cachedBar = null;
+
+    @GetMapping("/api/market/bar")
+    public List<Map<String,Object>> getMarketBar() {
+        CachedBar hit = cachedBar;
+        if (hit != null && hit.fresh()) return hit.data();
+
+        // TradingView scanner symbols
+        // Stocks/ETFs endpoint + Futures endpoint
+        record TvSymbol(String tv, String label, boolean futures) {}
+        List<TvSymbol> symbols = List.of(
+            new TvSymbol("AMEX:SPY",       "SPY",  false),
+            new TvSymbol("NASDAQ:QQQ",     "QQQ",  false),
+            new TvSymbol("CME_MINI:ES1!",  "ES1!", true)
+        );
+
+        List<Map<String,Object>> result = new ArrayList<>();
+
+        // Build two ticker lists: equities and futures
+        List<String> equityTickers  = new ArrayList<>();
+        List<String> futuresTickers = new ArrayList<>();
+        for (TvSymbol s : symbols) {
+            if (s.futures()) futuresTickers.add(s.tv());
+            else              equityTickers.add(s.tv());
+        }
+
+        // Fetch from TradingView scanner (one call per endpoint)
+        Map<String, double[]> prices = new java.util.LinkedHashMap<>(); // tv_symbol -> [close, changePct]
+
+        for (boolean futures : new boolean[]{false, true}) {
+            List<String> tickers = futures ? futuresTickers : equityTickers;
+            if (tickers.isEmpty()) continue;
+            String endpoint = futures
+                ? "https://scanner.tradingview.com/futures/scan"
+                : "https://scanner.tradingview.com/america/scan";
+            try {
+                String tickerJson = tickers.stream()
+                    .map(t -> "\"" + t + "\"")
+                    .collect(java.util.stream.Collectors.joining(","));
+                String body = "{\"symbols\":{\"tickers\":[" + tickerJson + "]," +
+                    "\"query\":{\"types\":[]}}," +
+                    "\"columns\":[\"close\",\"change\"]}";
+                HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(endpoint))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .header("Origin", "https://www.tradingview.com")
+                    .header("Referer", "https://www.tradingview.com/")
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .timeout(Duration.ofSeconds(6))
+                    .build();
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    JsonNode data = objectMapper.readTree(resp.body()).path("data");
+                    for (JsonNode row : data) {
+                        String tvSym = row.path("s").asText();
+                        JsonNode vals = row.path("d");
+                        double close  = vals.path(0).asDouble(0);
+                        double change = vals.path(1).asDouble(0);
+                        if (close > 0) prices.put(tvSym, new double[]{close, change});
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("TradingView market bar fetch failed: {}", e.getMessage());
+            }
+        }
+
+        // Assemble result in original order
+        String updatedAt = TIME_FMT.format(LocalTime.now(ET));
+        for (TvSymbol s : symbols) {
+            double[] p = prices.getOrDefault(s.tv(), new double[]{0, 0});
+            Map<String,Object> row = new java.util.LinkedHashMap<>();
+            row.put("symbol",     s.label());
+            row.put("price",      p[0]);
+            row.put("changePct",  p[1]);
+            row.put("updatedAt",  updatedAt);
+            row.put("source",     p[0] > 0 ? "tradingview" : "error");
+            result.add(row);
+        }
+
+        cachedBar = new CachedBar(result, System.currentTimeMillis());
+        return result;
     }
 
     // ── Model configuration endpoints ─────────────────────────────────────────

@@ -158,6 +158,62 @@ function applyColorCoding(html) {
         return out;
     });
 }
+function parseSortVal(cell) {
+    const raw = cell.textContent.trim();
+    // Strip common prefixes/suffixes and parse as number where possible
+    const num = parseFloat(raw.replace(/[^0-9.\-]/g, ''));
+    return isNaN(num) ? raw.toLowerCase() : num;
+}
+
+function makeSortable(table) {
+    const thead = table.querySelector('thead') || table.querySelector('tr');
+    if (!thead) return;
+    const ths = thead.nodeName === 'TR' ? thead.querySelectorAll('th') : thead.querySelectorAll('th');
+    if (!ths.length) return;
+
+    // Track sort state per table
+    let sortCol = -1, sortAsc = true;
+
+    ths.forEach((th, colIdx) => {
+        if (th.colSpan > 1) return; // skip spanned headers (e.g. earnings row)
+        th.style.cursor = 'pointer';
+        th.style.userSelect = 'none';
+        th.title = 'Click to sort';
+
+        th.addEventListener('click', () => {
+            const tbody = table.querySelector('tbody');
+            const rowParent = tbody || table;
+            // Collect only data rows (skip header row)
+            const headerRow = thead.nodeName === 'TR' ? thead : thead.querySelector('tr');
+            const rows = Array.from(rowParent.querySelectorAll('tr')).filter(r => r !== headerRow && r.querySelector('td'));
+            if (!rows.length) return;
+
+            const asc = sortCol === colIdx ? !sortAsc : true;
+            sortCol = colIdx;
+            sortAsc = asc;
+
+            rows.sort((ra, rb) => {
+                const ca = ra.querySelectorAll('td')[colIdx];
+                const cb = rb.querySelectorAll('td')[colIdx];
+                if (!ca || !cb) return 0;
+                const va = parseSortVal(ca);
+                const vb = parseSortVal(cb);
+                if (typeof va === 'number' && typeof vb === 'number') return asc ? va - vb : vb - va;
+                return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+            });
+
+            // Re-attach rows in new order
+            rows.forEach(r => rowParent.appendChild(r));
+
+            // Update sort indicators on all headers
+            ths.forEach((h, i) => {
+                h.textContent = h.textContent.replace(/ [▲▼]$/, '');
+                if (i === colIdx) h.textContent += asc ? ' ▲' : ' ▼';
+            });
+        });
+    });
+}
+
 function wrapTables(container) {
     container.querySelectorAll('table').forEach(t => {
         if (t.parentElement.classList.contains('table-scroll')) return;
@@ -165,6 +221,7 @@ function wrapTables(container) {
         wrap.className = 'table-scroll';
         t.parentNode.insertBefore(wrap, t);
         wrap.appendChild(t);
+        makeSortable(t);
     });
 }
 
@@ -1449,8 +1506,76 @@ async function clearJournal() {
     viewJournal();
 }
 
+// ── Market indices bar ────────────────────────────────────────────────────
+// symbol order matches the backend /api/market/bar response: SPY, QQQ, ES1!
+const MB_IDS    = ['SPY', 'QQQ', 'ES'];
+const mbPrevPrices = {};
+let mbRefreshTimer = null;
+
+function updateMbCell(id, d) {
+    const el = document.getElementById('mb-' + id);
+    if (!el || !d || d.price <= 0) return;
+
+    const prev       = mbPrevPrices[id];
+    const direction  = prev == null ? 'flat' : d.price > prev ? 'up' : d.price < prev ? 'down' : 'flat';
+    mbPrevPrices[id] = d.price;
+
+    const priceEl       = el.querySelector('.mb-price');
+    priceEl.textContent = '$' + d.price.toFixed(2);
+    priceEl.className   = 'mb-price ' + direction;
+
+    const chgEl     = el.querySelector('.mb-chg');
+    const dayDir    = d.changePct > 0.05 ? 'up' : d.changePct < -0.05 ? 'down' : 'flat';
+    const arrow     = dayDir === 'up' ? '▲' : dayDir === 'down' ? '▼' : '▬';
+    const sign      = d.changePct >= 0 ? '+' : '';
+    chgEl.innerHTML = `<span class="mb-arrow">${arrow}</span>${sign}${d.changePct.toFixed(2)}%`;
+    chgEl.className = 'mb-chg ' + dayDir;
+
+    if (direction !== 'flat') {
+        el.classList.remove('flash-up', 'flash-down');
+        void el.offsetWidth;
+        el.classList.add(direction === 'up' ? 'flash-up' : 'flash-down');
+        el.addEventListener('animationend', () => el.classList.remove('flash-up', 'flash-down'), { once: true });
+    }
+}
+
+async function refreshMarketBar() {
+    try {
+        const r = await fetch('/api/market/bar');
+        if (!r.ok) return;
+        const rows = await r.json();
+        rows.forEach((d, i) => {
+            if (MB_IDS[i]) updateMbCell(MB_IDS[i], d);
+        });
+    } catch { /* silent — bar stays stale */ }
+
+    const timeEl = document.getElementById('mb-time');
+    if (timeEl) {
+        const now = new Date();
+        timeEl.textContent = now.toLocaleTimeString('en-US',
+            { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+}
+
+function initMarketBar() {
+    refreshMarketBar();
+    mbRefreshTimer = setInterval(refreshMarketBar, 5_000);
+}
+
+async function manualMbRefresh() {
+    const btn = document.getElementById('mb-refresh-btn');
+    if (btn) {
+        btn.classList.remove('spinning');
+        void btn.offsetWidth;
+        btn.classList.add('spinning');
+        btn.addEventListener('animationend', () => btn.classList.remove('spinning'), { once: true });
+    }
+    await refreshMarketBar();
+}
+
 autoConnect();
 // Apply theme from localStorage immediately (fast path before server responds)
 applyTheme(localStorage.getItem(THEME_KEY) || 'light');
 initPrefs();
 initChipState();
+initMarketBar();

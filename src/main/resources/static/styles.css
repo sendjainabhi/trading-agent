@@ -180,6 +180,16 @@ th {
     font-weight: 600;
 }
 
+th[style*="cursor: pointer"]:hover,
+th[style*="cursor:pointer"]:hover {
+    background-color: #d4f0e0;
+}
+
+th[style*="cursor: pointer"],
+th[style*="cursor:pointer"] {
+    white-space: nowrap;
+}
+
 tr:nth-child(even) { background-color: #fcfcfc; }
 
 .control-panel {
@@ -303,6 +313,129 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 .suggestion-chips::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 2px; }
 
 /* ── Conversation context bar ───────────────────────────────────────────── */
+/* ── Market indices bar ─────────────────────────────────────────────────── */
+@keyframes mb-flash-up {
+    0%   { background: rgba(40,167,69,0.30); }
+    100% { background: transparent; }
+}
+@keyframes mb-flash-down {
+    0%   { background: rgba(220,53,69,0.25); }
+    100% { background: transparent; }
+}
+
+#market-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 20px;
+    background: var(--bg-chat);
+    border-bottom: 1px solid var(--border-light);
+    font-size: 0.82rem;
+    overflow-x: auto;
+    flex-shrink: 0;
+    scrollbar-width: none;
+}
+#market-bar::-webkit-scrollbar { display: none; }
+
+.mb-index {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 16px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.15s;
+    white-space: nowrap;
+}
+.mb-index:hover { background: rgba(40,167,69,0.08); }
+.mb-index.flash-up   { animation: mb-flash-up   0.7s ease-out forwards; }
+.mb-index.flash-down { animation: mb-flash-down 0.7s ease-out forwards; }
+
+.mb-name {
+    font-weight: 700;
+    color: var(--text-dark);
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+}
+.mb-sub {
+    font-size: 0.72rem;
+    font-weight: 400;
+    color: #888;
+}
+.mb-price {
+    font-weight: 700;
+    font-size: 0.88rem;
+    min-width: 58px;
+    text-align: right;
+    transition: color 0.3s;
+}
+.mb-price.up   { color: #28a745; }
+.mb-price.down { color: #dc3545; }
+.mb-price.flat { color: var(--text-dark); }
+
+.mb-chg {
+    font-size: 0.78rem;
+    min-width: 62px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+.mb-chg.up   { color: #28a745; }
+.mb-chg.down { color: #dc3545; }
+.mb-chg.flat { color: #888; }
+
+.mb-arrow {
+    font-size: 0.70rem;
+    line-height: 1;
+}
+
+.mb-sep {
+    width: 1px;
+    height: 28px;
+    background: var(--border-light);
+    flex-shrink: 0;
+}
+.mb-refresh {
+    margin-left: auto;
+    padding-left: 16px;
+    font-size: 0.70rem;
+    color: #aaa;
+    white-space: nowrap;
+}
+.mb-refresh-btn {
+    background: none;
+    border: 1px solid var(--border-light);
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+    color: #888;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 8px;
+    padding: 0;
+    flex-shrink: 0;
+    transition: color 0.15s, border-color 0.15s, transform 0.3s;
+}
+.mb-refresh-btn:hover { color: #28a745; border-color: #28a745; }
+.mb-refresh-btn.spinning { animation: mb-spin 0.6s linear; }
+@keyframes mb-spin { to { transform: rotate(360deg); } }
+[data-theme="dark"] .mb-refresh-btn { color: #666; border-color: #2d3748; }
+[data-theme="dark"] .mb-refresh-btn:hover { color: #68d391; border-color: #68d391; }
+
+[data-theme="dark"] .mb-index:hover { background: rgba(72,187,120,0.08); }
+[data-theme="dark"] .mb-sub         { color: #666; }
+[data-theme="dark"] .mb-chg.up      { color: #68d391; }
+[data-theme="dark"] .mb-chg.down    { color: #fc8181; }
+[data-theme="dark"] .mb-price.up    { color: #68d391; }
+[data-theme="dark"] .mb-price.down  { color: #fc8181; }
+
+/* ── Context bar ─────────────────────────────────────────────────────────── */
 .context-bar {
     display: flex;
     align-items: center;
@@ -1154,6 +1287,8 @@ button:disabled { background-color: #6c757d; cursor: not-allowed; opacity: 0.7; 
 
 [data-theme="dark"] table { background-color: #21263a; box-shadow: 0 0 0 1px #2d3748; }
 [data-theme="dark"] th { background-color: #1a3d28; color: #68d391; }
+[data-theme="dark"] th[style*="cursor: pointer"]:hover,
+[data-theme="dark"] th[style*="cursor:pointer"]:hover { background-color: #1f4f33; }
 [data-theme="dark"] th, [data-theme="dark"] td { border-color: #2d3748; color: #e2e8f0; }
 [data-theme="dark"] tr:nth-child(even) { background-color: #1e2533; }
 

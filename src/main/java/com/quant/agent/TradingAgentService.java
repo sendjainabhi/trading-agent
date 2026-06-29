@@ -358,40 +358,78 @@ public class TradingAgentService {
                     WHEEL STRATEGY — How it works (show this once at the top, in plain English):
                     "You sell a put option and collect cash upfront. If the stock stays above your strike, you keep the cash and repeat. If it drops below, you buy the stock — then sell a call to collect more cash while you wait to exit."
 
-                    <b>🎡 Wheel Strategy Picks — Top [count] picks ranked by weekly income</b>
+                    <b>🎡 Wheel Strategy Picks — [wheel_candidates.length] picks · ranked by conviction</b>
                     Scanned: [scan_date]
 
                     Render ONE table with ALL candidates. No blocks, no dividers between rows.
+                    Sort order: sub-$80 stocks first → by Priority (🔴 Red Day → 🟡 Bearish → ⚪ Standard) → within same priority by Day% ascending (biggest drop first)
+                    Priority key: 🔴 RED_DAY = down >0.5% today (best entry) · 🟡 BEARISH_BIAS = weekly slope down · ⚪ STANDARD
 
                     <table>
                     <tr>
                       <th>Stock</th>
-                      <th>Price</th>
+                      <th>Price / Day</th>
                       <th>Type</th>
+                      <th>Priority</th>
                       <th>IV</th>
-                      <th>Sell Put Strike</th>
-                      <th>You Collect</th>
-                      <th>Weekly Income</th>
+                      <th>Delta</th>
+                      <th>Put Strike</th>
+                      <th>Premium / Contract</th>
+                      <th>Weekly %</th>
                       <th>Capital Needed</th>
+                      <th>Take Profit</th>
                       <th>Expiry</th>
-                      <th>If Assigned → Sell Call</th>
+                      <th>If Assigned → Covered Call</th>
                     </tr>
-                    [One <tr> per wheel_candidate:]
+                    [One <tr> per wheel_candidate. Apply row rules below:]
+
+                    COMPANION ROW RULE: if is_companion=true, render ticker cell as:
+                      <td><b style="color:#6c757d;padding-left:1.2em">↳ [ticker]</b> <span style="font-size:0.8em;color:#adb5bd">2× alt for [parent_ticker]</span></td>
+
+                    EARNINGS WEEK RULE: if earnings_this_week=true, render ENTIRE PUT SIDE as:
+                      <td colspan="6"><span style="color:#fd7e14">⚠️ Earnings this week — skip new puts · see CC →</span></td>
+                    and still render the covered call column normally.
+
+                    NORMAL ROW (earnings_this_week=false):
                     <tr>
-                      <td><b>[ticker]</b></td>
-                      <td><b>$[price]</b></td>
+                      <td>[if is_companion: companion label (see above), else: <b><span class="ticker-link" onclick="submitChip('analyze [ticker]')" style="cursor:pointer;text-decoration:underline dotted">[ticker]</span></b> [if near_support: 🎯]]</td>
+                      <td><b>$[price]</b> <span style="font-size:0.85em;color:[#dc3545 if percent_change<0 else #28a745]">([+/−][percent_change | 1dp]%)</span></td>
                       <td>[if is_etf: "<span style='color:#ffc107'>Leveraged ETF ⚠️</span>" else "Stock"]</td>
+                      <td>[priority mapped: RED_DAY→<span style="color:#dc3545;font-weight:700">🔴 Red Day</span>, BEARISH_BIAS→<span style="color:#fd7e14">🟡 Bearish</span>, STANDARD→<span style="color:#6c757d">⚪</span>]</td>
                       <td>[iv]%</td>
-                      <td><b>$[put_strike]</b> ([pct_otm = (price−put_strike)/price×100, 1dp]% below price)</td>
-                      <td><b style="color:#28a745">~$[put_premium]/share = $[total_premium_per_contract] per contract</b></td>
-                      <td><b style="color:#28a745">[weekly_return_pct]%/wk</b></td>
-                      <td><b>$[put_strike × 100, 0dp]</b></td>
+                      <td><span style="color:#6c757d">[delta | 2dp]</span></td>
+                      <td><b>$[put_strike]</b> <span style="font-size:0.85em;color:#6c757d">([pct_otm=(price−put_strike)/price×100, 1dp]% OTM)</span></td>
+                      <td><b style="color:#28a745">$[put_premium]/sh · $[total_premium_per_contract]/contract</b></td>
+                      <td><b style="color:#28a745">[weekly_return_pct | 2dp]%/wk</b></td>
+                      <td><b>$[capital_if_assigned, 0dp]</b></td>
+                      <td><span style="color:#17a2b8">Close @ $[take_profit_at]/sh</span> <span style="font-size:0.8em;color:#6c757d">(90% profit)</span></td>
                       <td>[expiry]</td>
-                      <td><b>$[call_strike]</b> strike · collect ~<b style="color:#28a745">$[call_premium × 100, 0dp]</b> per contract</td>
+                      <td><b>$[call_strike, 2dp]</b> strike · ~<b style="color:#28a745">$[call_premium × 100, 0dp]</b>/contract [if analyst_buy_pct >= 70: <span style="font-size:0.8em;color:#28a745"> · [analyst_buy_pct]% analyst buy</span>]</td>
+                    </tr>
+
+                    EARNINGS WEEK ROW (earnings_this_week=true):
+                    <tr>
+                      <td>[ticker cell as above]</td>
+                      <td>$[price] ([pct]%)</td>
+                      <td>[type]</td>
+                      <td>[priority]</td>
+                      <td colspan="6"><span style="color:#fd7e14">⚠️ Earnings in [earnings_days_away]d — no new puts this week</span></td>
+                      <td><b>$[call_strike, 2dp]</b> strike · ~<b style="color:#28a745">$[call_premium × 100, 0dp]</b>/contract</td>
                     </tr>
                     </table>
 
-                    After the table, show one line: ⚠️ Leveraged ETF note: if assigned on any ETF, sell the covered call immediately and exit within 1–2 weeks — these decay over time.
+                    ── BEST PLAY CARD ──
+                    After the table, pick the single highest-conviction candidate (RED_DAY > near_support > highest weekly_return_pct) and show:
+
+                    <div class="trade-card" style="margin-top:12px;border-left:3px solid #28a745">
+                    <b>⭐ Best Play Right Now — [ticker] [if is_etf: "(ETF)"]</b><br>
+                    Sell <b>$[put_strike] put</b> expiring <b>[expiry]</b> · collect <b style="color:#28a745">~$[total_premium_per_contract]</b><br>
+                    Close position when premium decays to <b style="color:#17a2b8">$[take_profit_at]/share</b> (90% profit taken)<br>
+                    [if earnings_this_week: <span style="color:#fd7e14">⚠️ Skip put sell — earnings in [earnings_days_away] days. Run covered call instead: $[call_strike] · ~$[call_premium × 100, 0dp]/contract</span>]
+                    [if near_support: <span style="color:#6c757d;font-size:0.85em">🎯 Near 20d support — good risk/reward for put sale</span>]
+                    </div>
+
+                    ⚠️ Leveraged ETF note: if assigned on any leveraged ETF row, sell the covered call immediately and exit within 1–2 weeks — these products decay over time due to daily rebalancing.
                     """;
 
     // ── Swing scanner table — injected for swing/range queries ───────────────

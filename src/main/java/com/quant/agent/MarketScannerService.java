@@ -264,103 +264,185 @@ public class MarketScannerService {
      * Wheel strategy scan: finds stocks/ETFs $3–$80 with IV > 30% and ≥1%/week put premium.
      * Backing method for the wheelStrategyScannerFunction @Bean.
      */
-    public String scanWheelStrategy() {
-        String expiryPref = "default";
-        try {
-            List<String> universe = new ArrayList<>(List.of(
-                    // Stocks $3–$80 range
-                    "TSLA", "NVDA", "AAPL", "AMD", "PLTR", "SOFI", "RIVN", "INTC", "F", "BAC",
-                    "HOOD", "COIN", "MSTR", "MU", "SMCI", "ARM", "UBER", "NFLX", "AVGO", "META",
-                    "AMZN", "MSFT", "GOOGL", "DIS", "GE", "XOM", "AAL", "SNAP", "RBLX", "NIO",
-                    "LCID", "SOUN", "BBAI", "IONQ", "QBTS", "RGTI", "OPEN", "UPST", "AFRM",
-                    // Leveraged ETFs
-                    "TSLL", "NVDL", "AAPU", "METU", "AMZU", "MSFU", "CONL", "MSTU",
-                    "TQQQ", "SPXL", "SOXL", "LABU", "FNGU", "TECL", "WEBL", "DPST"
-            ));
 
-            ZoneId et = ZoneId.of("America/New_York");
+    // ── Stock → 2x/3x ETF companion map (for stocks typically >$80) ──────────
+    private static final Map<String, String> STOCK_TO_2X_ETF = Map.ofEntries(
+        Map.entry("AAPL",  "AAPU"),   // 2× AAPL (GraniteShares)
+        Map.entry("MSFT",  "MSFU"),   // 2× MSFT
+        Map.entry("NVDA",  "NVDL"),   // 2× NVDA
+        Map.entry("AMZN",  "AMZU"),   // 2× AMZN
+        Map.entry("META",  "METU"),   // 2× META
+        Map.entry("TSLA",  "TSLL"),   // 2× TSLA
+        Map.entry("GOOGL", "GGLL"),   // 2× Alphabet
+        Map.entry("AVGO",  "SOXL"),   // SOX semis proxy
+        Map.entry("QCOM",  "SOXL"),
+        Map.entry("JPM",   "FAS"),    // 3× financials
+        Map.entry("GS",    "FAS"),
+        Map.entry("V",     "FAS"),
+        Map.entry("MA",    "FAS"),
+        Map.entry("HD",    "QLD"),    // 2× QQQ proxy for mega-caps
+        Map.entry("COST",  "QLD"),
+        Map.entry("CRM",   "QLD"),
+        Map.entry("ORCL",  "QLD"),
+        Map.entry("UNH",   "SSO")     // 2× SPY for healthcare/defensive
+    );
+
+    private static final java.util.Set<String> ETF_TICKERS = java.util.Set.of(
+        "TSLL","NVDL","AAPU","METU","AMZU","MSFU","CONL","MSTU","GGLL",
+        "TQQQ","SPXL","SOXL","QLD","SSO","TECL","FAS","UYG","ERX","LABU","FNGU","DPST"
+    );
+
+    public String scanWheelStrategy() {
+        try {
+            // ── Curated high-conviction universe (~80 tickers) ───────────────
+            List<String> universe = List.of(
+                // Quality stocks — typically $3–$80 (primary candidates)
+                "PLTR","SOFI","SNAP","RBLX","NIO","RIVN","LCID","HOOD","COIN","AFRM",
+                "UPST","OPEN","IONQ","SOUN","INTC","MU","SMCI","F","GM","UBER",
+                "LYFT","SQ","PYPL","BAC","C","WFC","KEY","T","VZ","AAL",
+                "DAL","UAL","CCL","RCL","GE","X","CLF","AA","MARA","RIOT",
+                "DIS","AMD","NFLX","ARM","MSTR","BBAI","QBTS","RGTI","XOM","PARA",
+                // Large-caps often >$80 — shown de-prioritised, ETF companion generated
+                "AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL",
+                "JPM","GS","V","MA","HD","COST","AVGO","QCOM","CRM","ORCL","UNH",
+                // 2×/3× leveraged ETFs — always in $3–$80 range
+                "TSLL","NVDL","AAPU","METU","AMZU","MSFU","CONL","GGLL",
+                "TQQQ","SPXL","SOXL","QLD","SSO","TECL","FAS","LABU","FNGU"
+            );
+
+            ZoneId   et    = ZoneId.of("America/New_York");
             ZonedDateTime nowET = ZonedDateTime.now(et);
-            String startDate = nowET.minusDays(15).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+            LocalDate today = nowET.toLocalDate();
+            boolean   isWeekday = today.getDayOfWeek().getValue() <= 5;
+            String startDate = nowET.minusDays(90)
+                                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
             String endDate   = nowET.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
 
-            LocalDate today = nowET.toLocalDate();
+            // ── Expanded record carrying all new fields ───────────────────────
+            record WheelCandidate(
+                String  ticker,
+                double  price,
+                double  iv,               // annualised, 0–1 scale
+                double  putStrike,
+                double  putPremium,       // per share
+                double  weeklyReturnPct,
+                String  expiryDate,
+                long    volume,
+                double  callStrikeVal,
+                double  callPremium,
+                boolean isEtf,
+                double  percentChange,
+                boolean isRedDay,         // true when percentChange < -0.5 on a weekday
+                boolean bearishWeekly,    // 5-bar slope negative
+                double  delta,
+                double  capitalIfAssigned,
+                double  takeProfitAt,     // premium × 0.10 (90% capture target)
+                int     earningsDaysAway,
+                boolean earningsThisWeek, // earningsDaysAway ≤ 7
+                double  low20d,           // 20-day low used as swing support proxy
+                boolean nearSupport,
+                int     analystBuyPct,
+                double  insiderMspr,
+                String  etfAlt,           // companion 2x ETF ticker, "" if N/A
+                boolean isCompanion,      // true = this row is an ETF companion
+                String  parentTicker      // set for companion rows
+            ) {}
 
-            record WheelCandidate(String ticker, double price, double iv, double putStrike,
-                                  double putPremium, double weeklyReturnPct, String expiryDate,
-                                  long volume, String callStrike, double callPremium, boolean isEtf) {}
-
+            // ── Phase 1: Alpaca-only fast filter (parallel) ──────────────────
             List<CompletableFuture<WheelCandidate>> futures = new ArrayList<>();
-
             for (String ticker : universe) {
                 final String sym = ticker;
                 futures.add(CompletableFuture.supplyAsync(() -> {
                     try {
-                        // 1. Get price + volume from Alpaca bars
+                        // Bars — 65 days to support EMA50 + 60d high calc
                         String barsUrl = "https://data.alpaca.markets/v2/stocks/bars?symbols=" + sym
-                                + "&timeframe=1Day&start=" + startDate + "&end=" + endDate + "&limit=15&feed=iex";
-                        HttpRequest barsReq = HttpRequest.newBuilder().uri(URI.create(barsUrl))
-                                .header("APCA-API-KEY-ID", alpacaClient.apiKey)
-                                .header("APCA-API-SECRET-KEY", alpacaClient.apiSecret).GET().build();
-                        HttpResponse<String> barsResp = alpacaClient.httpClient.send(barsReq, HttpResponse.BodyHandlers.ofString());
+                            + "&timeframe=1Day&start=" + startDate + "&end=" + endDate
+                            + "&limit=65&feed=iex";
+                        HttpRequest barsReq = HttpRequest.newBuilder()
+                            .uri(URI.create(barsUrl))
+                            .header("APCA-API-KEY-ID", alpacaClient.apiKey)
+                            .header("APCA-API-SECRET-KEY", alpacaClient.apiSecret).GET().build();
+                        HttpResponse<String> barsResp = alpacaClient.httpClient.send(
+                            barsReq, HttpResponse.BodyHandlers.ofString());
                         if (barsResp.statusCode() != 200) return null;
-                        JsonNode bars = alpacaClient.objectMapper.readTree(barsResp.body()).path("bars").path(sym);
-                        if (!bars.isArray() || bars.size() < 3) return null;
-                        double price = bars.get(bars.size() - 1).path("c").asDouble(0);
-                        long volume  = bars.get(bars.size() - 1).path("v").asLong(0);
+                        JsonNode bars = alpacaClient.objectMapper.readTree(barsResp.body())
+                            .path("bars").path(sym);
+                        if (!bars.isArray() || bars.size() < 10) return null;
 
-                        // Filter: price $3–$80, volume > 1M
-                        if (price < 3.0 || price > 80.0) return null;
-                        if (volume < 1_000_000) return null;
+                        double price  = bars.get(bars.size() - 1).path("c").asDouble(0);
+                        long   volume = bars.get(bars.size() - 1).path("v").asLong(0);
+                        if (price <= 0 || volume < 1_000_000) return null;
 
-                        // 2. Trend check — must be bullish or neutral (daily SMA10)
-                        double sma10 = IndicatorUtils.calculateSmaFromBars(bars, Math.min(10, bars.size()));
-                        // Bearish: recent bars consistently below sma10
-                        double last3avg = 0;
-                        int last3cnt = Math.min(3, bars.size());
-                        for (int i = bars.size() - last3cnt; i < bars.size(); i++)
-                            last3avg += bars.get(i).path("c").asDouble();
-                        last3avg /= last3cnt;
-                        if (sma10 > 0 && last3avg < sma10 * 0.95) return null; // strongly bearish — skip
+                        // Percent change (day over day)
+                        double prevClose     = bars.get(bars.size() - 2).path("c").asDouble(price);
+                        double percentChange = prevClose > 0 ? ((price - prevClose) / prevClose) * 100.0 : 0.0;
+                        boolean isRedDay     = isWeekday && percentChange < -0.5;
 
-                        // 3. Get near-ATM IV from today's options snapshot
+                        // EMA50 — long-term trend check
+                        double ema50 = IndicatorUtils.calculateEmaFromBars(bars, Math.min(50, bars.size()));
+                        // Skip fallen knives: price >20% below EMA50 AND recent slope negative
+                        double weekSlope = bars.size() >= 6
+                            ? bars.get(bars.size() - 1).path("c").asDouble()
+                              - bars.get(bars.size() - 6).path("c").asDouble()
+                            : 0;
+                        boolean bearishWeekly = weekSlope < 0;
+                        if (ema50 > 0 && price < ema50 * 0.80 && bearishWeekly) return null;
+
+                        // 60-day high — fallen knife hard block (>20% below AND weekly down)
+                        double high60d = 0;
+                        for (JsonNode bar : bars) {
+                            double h = bar.path("h").asDouble(0);
+                            if (h > high60d) high60d = h;
+                        }
+                        if (high60d > 0 && price < high60d * 0.80 && bearishWeekly) return null;
+
+                        // 20-day low as swing support proxy
+                        double low20d = Double.MAX_VALUE;
+                        int lb20 = Math.min(20, bars.size());
+                        for (int i = bars.size() - lb20; i < bars.size(); i++) {
+                            double l = bars.get(i).path("l").asDouble(Double.MAX_VALUE);
+                            if (l > 0) low20d = Math.min(low20d, l);
+                        }
+                        if (low20d == Double.MAX_VALUE) low20d = 0;
+                        boolean nearSupport = low20d > 0 && price >= low20d && price <= low20d * 1.06;
+
+                        // Options snapshot — derive IV
                         String optUrl = "https://data.alpaca.markets/v1beta1/options/snapshots/" + sym
-                                + "?feed=indicative&strike_price_gte=" + (price * 0.95)
-                                + "&strike_price_lte=" + (price * 1.05) + "&limit=20";
-                        HttpRequest optReq = HttpRequest.newBuilder().uri(URI.create(optUrl))
-                                .header("APCA-API-KEY-ID", alpacaClient.apiKey)
-                                .header("APCA-API-SECRET-KEY", alpacaClient.apiSecret).GET().build();
-                        HttpResponse<String> optResp = alpacaClient.httpClient.send(optReq, HttpResponse.BodyHandlers.ofString());
-
+                            + "?feed=indicative&strike_price_gte=" + String.format("%.2f", price * 0.90)
+                            + "&strike_price_lte=" + String.format("%.2f", price * 1.10) + "&limit=30";
+                        HttpRequest optReq = HttpRequest.newBuilder()
+                            .uri(URI.create(optUrl))
+                            .header("APCA-API-KEY-ID", alpacaClient.apiKey)
+                            .header("APCA-API-SECRET-KEY", alpacaClient.apiSecret).GET().build();
+                        HttpResponse<String> optResp = alpacaClient.httpClient.send(
+                            optReq, HttpResponse.BodyHandlers.ofString());
                         double iv = 0;
                         if (optResp.statusCode() == 200) {
-                            JsonNode snapshots = alpacaClient.objectMapper.readTree(optResp.body()).path("snapshots");
-                            Iterator<Map.Entry<String, JsonNode>> it = snapshots.fields();
-                            double ivSum = 0; int ivCount = 0;
+                            JsonNode snaps = alpacaClient.objectMapper.readTree(optResp.body()).path("snapshots");
+                            Iterator<Map.Entry<String, JsonNode>> it = snaps.fields();
+                            double ivSum = 0; int ivCnt = 0;
                             while (it.hasNext()) {
-                                Map.Entry<String, JsonNode> entry = it.next();
-                                // Parse IV from bid/ask spread as proxy: mid/price ≈ IV×sqrt(T/365)
-                                JsonNode snap = entry.getValue();
+                                JsonNode snap = it.next().getValue();
                                 double ap = snap.path("latestQuote").path("ap").asDouble(0);
                                 double bp = snap.path("latestQuote").path("bp").asDouble(0);
                                 if (ap <= 0 || bp <= 0) continue;
-                                double mid = (ap + bp) / 2.0;
-                                // Back-calculate IV: IV ≈ mid / (price * sqrt(1/52)) for ~1-week ATM
-                                double rawIv = (price > 0) ? (mid / price) * Math.sqrt(52.0) : 0;
-                                if (rawIv > 0.10 && rawIv < 5.0) { ivSum += rawIv; ivCount++; }
+                                double raw = (price > 0) ? ((ap + bp) / 2.0 / price) * Math.sqrt(52.0) : 0;
+                                if (raw > 0.10 && raw < 5.0) { ivSum += raw; ivCnt++; }
                             }
-                            if (ivCount > 0) iv = ivSum / ivCount;
+                            if (ivCnt > 0) iv = ivSum / ivCnt;
                         }
+                        // IV rank gate: 0.25–0.65
+                        if (iv < 0.25 || iv > 0.65) return null;
 
-                        // Filter: IV must be > 30%
-                        if (iv < 0.30) return null;
+                        // Expected-move lower bound for the week: price - price×IV×√(7/365)
+                        double expectedMoveLower = price - price * iv * Math.sqrt(7.0 / 365.0);
 
-                        // Put strike: 12.5% OTM, rounded to nearest $0.50
-                        double putStrikeRaw = price * 0.875;
-                        double putStrike = Math.round(putStrikeRaw * 2.0) / 2.0;
-                        double capital = putStrike * 100.0;
+                        // Put strike: nearest $0.50 step just below expected move (with 0.5% buffer)
+                        double rawStrike = expectedMoveLower * 0.995;
+                        double putStrike = Math.round(rawStrike * 2.0) / 2.0;
+                        double capital   = putStrike * 100.0;
 
-                        // Build candidate expiry windows based on user preference
-                        // weekly = next Friday ≥7 days, biweekly = next Friday ≥14 days, monthly = next Friday ≥28 days
+                        // Expiry ladder: weekly → biweekly → monthly, pick first that yields ≥1%/wk
                         LocalDate wkExp = today.plusDays(7);
                         while (wkExp.getDayOfWeek().getValue() != 5) wkExp = wkExp.plusDays(1);
                         LocalDate bwExp = today.plusDays(14);
@@ -368,56 +450,77 @@ public class MarketScannerService {
                         LocalDate moExp = today.plusDays(28);
                         while (moExp.getDayOfWeek().getValue() != 5) moExp = moExp.plusDays(1);
 
-                        // Order of expiries to try based on user preference
-                        List<LocalDate> expiriesToTry;
-                        if ("monthly".equals(expiryPref)) {
-                            expiriesToTry = List.of(moExp, bwExp, wkExp);
-                        } else if ("biweekly".equals(expiryPref) || "2week".equals(expiryPref) || "2 week".equals(expiryPref)) {
-                            expiriesToTry = List.of(bwExp, wkExp, moExp);
-                        } else {
-                            // Default: weekly first for all tickers; fallback biweekly → monthly
-                            expiriesToTry = List.of(wkExp, bwExp, moExp);
-                        }
+                        // Always default to weekly expiry. Only fall back to biweekly/monthly
+                        // if weekly premium is literally zero (no liquidity), not just under 1%/wk.
+                        long   wkDays   = today.until(wkExp, ChronoUnit.DAYS);
+                        double wkPrem   = Math.round(putStrike * iv * Math.sqrt(wkDays / 365.0) * 0.30 * 100.0) / 100.0;
+                        double wkReturn = capital > 0 ? (wkPrem * 100.0) / capital / (wkDays / 7.0) * 100.0 : 0;
 
-                        // Try each expiry until one hits ≥1%/week
-                        LocalDate chosenExp = null;
-                        double putPremium = 0, weeklyReturn_final = 0;
-                        String expiryLabel = "weekly";
-                        for (LocalDate exp : expiriesToTry) {
-                            long days = today.until(exp, ChronoUnit.DAYS);
-                            double weeks = days / 7.0;
-                            double premium = Math.round(putStrike * iv * Math.sqrt(days / 365.0) * 0.30 * 100.0) / 100.0;
-                            double wkReturn = (premium * 100.0) / capital / weeks * 100.0;
-                            if (wkReturn >= 1.0) {
-                                chosenExp = exp;
-                                putPremium = premium;
-                                weeklyReturn_final = wkReturn;
-                                long expDays = today.until(exp, ChronoUnit.DAYS);
-                                expiryLabel = expDays <= 10 ? "weekly" : expDays <= 21 ? "2-week" : "monthly";
-                                break;
+                        LocalDate chosenExp;
+                        double putPremium;
+                        double weeklyReturn;
+                        String expiryLabel;
+
+                        if (wkPrem > 0) {
+                            // Use weekly regardless of whether it clears 1%/wk
+                            chosenExp    = wkExp;
+                            putPremium   = wkPrem;
+                            weeklyReturn = wkReturn;
+                            expiryLabel  = "weekly";
+                        } else {
+                            // Weekly has no premium — try biweekly then monthly as fallback
+                            chosenExp    = null;
+                            putPremium   = 0;
+                            weeklyReturn = 0;
+                            expiryLabel  = "weekly";
+                            for (LocalDate exp : List.of(bwExp, moExp)) {
+                                long   daysOut = today.until(exp, ChronoUnit.DAYS);
+                                double wks     = daysOut / 7.0;
+                                double prem    = Math.round(putStrike * iv * Math.sqrt(daysOut / 365.0) * 0.30 * 100.0) / 100.0;
+                                double wkRet   = capital > 0 ? (prem * 100.0) / capital / wks * 100.0 : 0;
+                                if (prem > 0) {
+                                    chosenExp    = exp;
+                                    putPremium   = prem;
+                                    weeklyReturn = wkRet;
+                                    expiryLabel  = daysOut <= 21 ? "2-week" : "monthly";
+                                    break;
+                                }
                             }
                         }
-                        if (chosenExp == null) return null; // no expiry hits 1%/week
+                        // Require at least 0.75%/wk (flexible floor — good stocks near support may yield slightly less)
+                        if (chosenExp == null || weeklyReturn < 0.75) return null;
 
-                        long chosenDays = today.until(chosenExp, ChronoUnit.DAYS);
-                        double chosenWeeks = chosenDays / 7.0;
-                        double totalReturn = weeklyReturn_final * chosenWeeks;
-                        String totalSuffix = "weekly".equals(expiryLabel) ? "weekly" : expiryLabel + " · total ~" + String.format("%.1f", totalReturn) + "%";
-                        String bestExpiry = chosenExp.format(DateTimeFormatter.ofPattern("MMM dd, yyyy")) + " (" + totalSuffix + ")";
+                        long   chosenDays  = today.until(chosenExp, ChronoUnit.DAYS);
+                        double totalReturn = weeklyReturn * (chosenDays / 7.0);
+                        String expDisplay  = chosenExp.format(DateTimeFormatter.ofPattern("MMM dd, yyyy"))
+                            + " (" + expiryLabel
+                            + ("weekly".equals(expiryLabel) ? "" : " · total ~" + String.format("%.1f", totalReturn) + "%")
+                            + ")";
 
-                        // Covered call strike: 5% above current price
+                        // Delta (Black-Scholes N(-d1) approximation)
+                        double delta = StockAnalysisEngine.putDelta(price, putStrike, iv, (int) chosenDays);
+
+                        // Covered call: strike 5% above price (always show regardless of earnings)
                         double callStrikeVal = Math.round(price * 1.05 * 2.0) / 2.0;
-                        double callPremium = Math.round(putPremium * 0.6 * 100.0) / 100.0;
+                        double callPremium   = Math.round(putPremium * 0.6 * 100.0) / 100.0;
 
-                        boolean isEtf = sym.equals("TSLL") || sym.equals("NVDL") || sym.equals("AAPU")
-                                || sym.equals("METU") || sym.equals("AMZU") || sym.equals("MSFU")
-                                || sym.equals("CONL") || sym.equals("MSTU") || sym.equals("TQQQ")
-                                || sym.equals("SPXL") || sym.equals("SOXL") || sym.equals("LABU")
-                                || sym.equals("FNGU") || sym.equals("TECL") || sym.equals("WEBL") || sym.equals("DPST");
+                        double capitalIfAssigned = putStrike * 100.0;
+                        double takeProfitAt      = Math.round(putPremium * 0.10 * 100.0) / 100.0;
 
-                        return new WheelCandidate(sym, price, iv * 100, putStrike, putPremium,
-                                weeklyReturn_final, bestExpiry, volume,
-                                String.format("%.2f", callStrikeVal), callPremium, isEtf);
+                        boolean isEtf = ETF_TICKERS.contains(sym);
+                        String  etfAlt = (!isEtf && price > 80.0) ? STOCK_TO_2X_ETF.getOrDefault(sym, "") : "";
+
+                        // Phase 1 survivor — Finnhub quality check happens in Phase 2 below
+                        return new WheelCandidate(
+                            sym, price, iv, putStrike, putPremium, weeklyReturn, expDisplay, volume,
+                            callStrikeVal, callPremium, isEtf,
+                            percentChange, isRedDay, bearishWeekly,
+                            delta, capitalIfAssigned, takeProfitAt,
+                            999, false,   // earningsDaysAway + earningsThisWeek — filled in Phase 2
+                            low20d, nearSupport,
+                            50, 0.0,      // analystBuyPct + insiderMspr — filled in Phase 2
+                            etfAlt, false, ""
+                        );
                     } catch (Exception e) {
                         return null;
                     }
@@ -426,39 +529,122 @@ public class MarketScannerService {
 
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-            List<WheelCandidate> candidates = new ArrayList<>();
-            for (CompletableFuture<WheelCandidate> f : futures) {
+            List<WheelCandidate> phase1 = new ArrayList<>();
+            for (var f : futures) {
                 WheelCandidate c = f.join();
-                if (c != null) candidates.add(c);
+                if (c != null) phase1.add(c);
             }
 
-            // Sort by weekly return % descending
-            candidates.sort((a, b) -> Double.compare(b.weeklyReturnPct(), a.weeklyReturnPct()));
-            List<WheelCandidate> top5 = candidates.subList(0, Math.min(5, candidates.size()));
-
-            if (top5.isEmpty()) return "{\"error\":\"No wheel candidates found matching criteria.\"}";
-
-            LocalDate today2 = ZonedDateTime.now(ZoneId.of("America/New_York")).toLocalDate();
-            StringBuilder sb = new StringBuilder("[");
-            for (int i = 0; i < top5.size(); i++) {
-                WheelCandidate c = top5.get(i);
-                if (i > 0) sb.append(",");
-                sb.append(String.format(
-                    "{\"ticker\":\"%s\",\"price\":%.2f,\"iv\":%.1f,\"put_strike\":%.2f," +
-                    "\"put_premium\":%.2f,\"total_premium_per_contract\":%.0f," +
-                    "\"weekly_return_pct\":%.2f,\"expiry\":\"%s\",\"volume\":%d," +
-                    "\"call_strike\":\"%s\",\"call_premium\":%.2f,\"is_etf\":%b}",
+            // ── Phase 2: Finnhub quality gate (sequential, rate-limited) ─────
+            List<WheelCandidate> qualified = new ArrayList<>();
+            for (WheelCandidate c : phase1) {
+                StockAnalysisEngine.WheelQuality q = engine.fetchWheelQuality(c.ticker());
+                boolean qualityPass = q.analystBuyPct() >= 60 || q.insiderMspr() > 10;
+                if (!qualityPass && !c.isEtf()) continue; // ETFs bypass quality check
+                boolean earningsThisWeek = q.earningsDaysAway() <= 7;
+                // Earnings this week → skip NEW put sell but still include for CC display
+                // We keep the candidate and flag it; template shows CC row, not put row
+                qualified.add(new WheelCandidate(
                     c.ticker(), c.price(), c.iv(), c.putStrike(), c.putPremium(),
-                    c.putPremium() * 100, c.weeklyReturnPct(), c.expiryDate(),
-                    c.volume(), c.callStrike(), c.callPremium(), c.isEtf()));
+                    c.weeklyReturnPct(), c.expiryDate(), c.volume(),
+                    c.callStrikeVal(), c.callPremium(), c.isEtf(),
+                    c.percentChange(), c.isRedDay(), c.bearishWeekly(),
+                    c.delta(), c.capitalIfAssigned(), c.takeProfitAt(),
+                    q.earningsDaysAway(), earningsThisWeek,
+                    c.low20d(), c.nearSupport(),
+                    q.analystBuyPct(), q.insiderMspr(),
+                    c.etfAlt(), false, ""
+                ));
+            }
+
+            if (qualified.isEmpty()) return "{\"error\":\"No wheel candidates found matching criteria.\"}";
+
+            // ── Phase 3: Sort ─────────────────────────────────────────────────
+            // Primary: sub-$80 stocks (and ETFs) always before >$80 stocks
+            // Secondary within group: RED_DAY > BEARISH_BIAS > STANDARD
+            // Tertiary within same priority: most negative percent_change first (biggest red day)
+            qualified.sort((a, b) -> {
+                boolean aUnder = a.price() <= 80 || a.isEtf();
+                boolean bUnder = b.price() <= 80 || b.isEtf();
+                if (aUnder != bUnder) return aUnder ? -1 : 1; // sub-$80 always first
+
+                int priA = a.isRedDay() ? 2 : a.bearishWeekly() ? 1 : 0;
+                int priB = b.isRedDay() ? 2 : b.bearishWeekly() ? 1 : 0;
+                if (priA != priB) return Integer.compare(priB, priA); // higher priority first
+
+                // Same priority: most negative day change first (best entry point)
+                return Double.compare(a.percentChange(), b.percentChange());
+            });
+
+            // ── Phase 4: Build output rows — insert ETF companion right after parent ─
+            // Build a lookup of ETF companions already in qualified
+            java.util.Map<String, WheelCandidate> etfByTicker = new java.util.LinkedHashMap<>();
+            for (WheelCandidate c : qualified) {
+                if (c.isEtf()) etfByTicker.put(c.ticker(), c);
+            }
+            java.util.Set<String> insertedEtfs = new java.util.HashSet<>();
+            List<WheelCandidate> outputRows = new ArrayList<>();
+            for (WheelCandidate c : qualified) {
+                if (c.isEtf() && insertedEtfs.contains(c.ticker())) continue; // already placed as companion
+                outputRows.add(c);
+                // If this is a >$80 stock with a known ETF alt, insert the companion immediately after
+                if (!c.isEtf() && !c.etfAlt().isEmpty() && etfByTicker.containsKey(c.etfAlt())) {
+                    WheelCandidate etfRow = etfByTicker.get(c.etfAlt());
+                    // Re-create as companion row
+                    outputRows.add(new WheelCandidate(
+                        etfRow.ticker(), etfRow.price(), etfRow.iv(), etfRow.putStrike(), etfRow.putPremium(),
+                        etfRow.weeklyReturnPct(), etfRow.expiryDate(), etfRow.volume(),
+                        etfRow.callStrikeVal(), etfRow.callPremium(), etfRow.isEtf(),
+                        etfRow.percentChange(), etfRow.isRedDay(), etfRow.bearishWeekly(),
+                        etfRow.delta(), etfRow.capitalIfAssigned(), etfRow.takeProfitAt(),
+                        etfRow.earningsDaysAway(), etfRow.earningsThisWeek(),
+                        etfRow.low20d(), etfRow.nearSupport(),
+                        etfRow.analystBuyPct(), etfRow.insiderMspr(),
+                        "", true, c.ticker()
+                    ));
+                    insertedEtfs.add(c.etfAlt());
+                }
+            }
+
+            // Cap output at 8 rows
+            List<WheelCandidate> top = outputRows.subList(0, Math.min(8, outputRows.size()));
+
+            // ── Build JSON ────────────────────────────────────────────────────
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < top.size(); i++) {
+                WheelCandidate c = top.get(i);
+                if (i > 0) sb.append(",");
+                String priority = c.isRedDay() ? "RED_DAY"
+                    : c.bearishWeekly() ? "BEARISH_BIAS" : "STANDARD";
+                sb.append(String.format(
+                    "{\"ticker\":\"%s\",\"price\":%.2f,\"iv\":%.1f," +
+                    "\"put_strike\":%.2f,\"put_premium\":%.2f," +
+                    "\"total_premium_per_contract\":%.0f,\"weekly_return_pct\":%.2f," +
+                    "\"expiry\":\"%s\",\"volume\":%d," +
+                    "\"call_strike\":\"%.2f\",\"call_premium\":%.2f," +
+                    "\"is_etf\":%b,\"percent_change\":%.2f,\"priority\":\"%s\"," +
+                    "\"delta\":%.2f,\"capital_if_assigned\":%.0f,\"take_profit_at\":%.2f," +
+                    "\"earnings_days_away\":%d,\"earnings_this_week\":%b," +
+                    "\"near_support\":%b,\"analyst_buy_pct\":%d,\"insider_mspr\":%.1f," +
+                    "\"etf_alt\":\"%s\",\"is_companion\":%b,\"parent_ticker\":\"%s\"}",
+                    c.ticker(), c.price(), c.iv() * 100,
+                    c.putStrike(), c.putPremium(), c.putPremium() * 100, c.weeklyReturnPct(),
+                    c.expiryDate(), c.volume(),
+                    c.callStrikeVal(), c.callPremium(),
+                    c.isEtf(), c.percentChange(), priority,
+                    c.delta(), c.capitalIfAssigned(), c.takeProfitAt(),
+                    c.earningsDaysAway(), c.earningsThisWeek(),
+                    c.nearSupport(), c.analystBuyPct(), c.insiderMspr(),
+                    c.etfAlt(), c.isCompanion(), c.parentTicker()
+                ));
             }
             sb.append("]");
 
             return String.format("{\"status\":\"success\",\"scan_date\":\"%s\",\"wheel_candidates\":%s}",
-                    today2, sb);
+                today, sb);
 
         } catch (Exception e) {
-            return "{\"error\":\"Wheel scan failed.\"}";
+            return "{\"error\":\"Wheel scan failed: " + e.getMessage() + "\"}";
         }
     }
 
@@ -793,7 +979,8 @@ public class MarketScannerService {
         results.removeIf(r -> {
             boolean isSwingLong = "SWING_LONG".equals(engine.extractSwingSignal(r));
             boolean hasBullDiv  = "BULLISH_DIV".equals(engine.extractRsiDivergence(r));
-            return !(isSwingLong && hasBullDiv);
+            boolean isOversold  = engine.extractRsi14d(r) < 40.0;
+            return !(isSwingLong && (hasBullDiv || isOversold));
         });
         results.sort((a, b) -> Double.compare(
                 engine.extractConfluenceScore(b), engine.extractConfluenceScore(a)));

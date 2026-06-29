@@ -15,6 +15,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.List;
@@ -130,6 +131,10 @@ public class StockAnalysisEngine {
 
     public String extractRsiDivergence(String json) {
         try { return objectMapper.readTree(json).path("rsi_divergence").asText("NONE"); } catch (Exception e) { return "NONE"; }
+    }
+
+    public double extractRsi14d(String json) {
+        try { return objectMapper.readTree(json).path("rsi_14d").asDouble(50.0); } catch (Exception e) { return 50.0; }
     }
 
     public String extractUnusualOptions(String json) {
@@ -300,7 +305,7 @@ public class StockAnalysisEngine {
                     double pctChg5d = price5ago > 0 ? (currentPrice - price5ago) / price5ago * 100 : 0;
                     double rsiChg5d = rsi14 - rsi5ago;
                     if      (pctChg5d >  2.0 && rsiChg5d < -5.0) rsiDivergence = "BEARISH_DIV";
-                    else if (pctChg5d < -2.0 && rsiChg5d >  5.0) rsiDivergence = "BULLISH_DIV";
+                    else if (pctChg5d < -1.0 && rsiChg5d >  3.0) rsiDivergence = "BULLISH_DIV";
                 }
                 // Rolling HRV distribution — used for IV rank, computed here while tickerNode is in scope
                 if (d1sz >= 42) {
@@ -1678,5 +1683,86 @@ public class StockAnalysisEngine {
         } catch (Exception e) {
             return String.format("{\"error\":\"CRITICAL FAILURE: Exception building trend metrics for %s.\"}", ticker);
         }
+    }
+
+    // ── Wheel strategy quality check (3 targeted Finnhub calls) ──────────────
+
+    record WheelQuality(int analystBuyPct, double insiderMspr, int earningsDaysAway) {}
+
+    WheelQuality fetchWheelQuality(String sym) {
+        int analystBuyPct = 50;
+        double insiderMspr = 0.0;
+        int earningsDaysAway = 999;
+        try {
+            // 1. Analyst consensus
+            HttpResponse<String> recResp = finnhubAsync(
+                "https://finnhub.io/api/v1/stock/recommendation?symbol=" + sym + "&token=" + finnhubKey)
+                .get(6, TimeUnit.SECONDS);
+            if (recResp != null && recResp.statusCode() == 200) {
+                JsonNode arr = objectMapper.readTree(recResp.body());
+                if (arr.isArray() && arr.size() > 0) {
+                    JsonNode r = arr.get(0);
+                    int buy   = r.path("buy").asInt(0) + r.path("strongBuy").asInt(0);
+                    int hold  = r.path("hold").asInt(0);
+                    int sell  = r.path("sell").asInt(0) + r.path("strongSell").asInt(0);
+                    int total = buy + hold + sell;
+                    if (total > 0) analystBuyPct = (buy * 100) / total;
+                }
+            }
+            // 2. Insider MSPR
+            ZonedDateTime now = ZonedDateTime.now(ZoneId.of("America/New_York"));
+            String fromDate = now.minusMonths(3).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+            String toDate   = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+            HttpResponse<String> insiderResp = finnhubAsync(
+                "https://finnhub.io/api/v1/stock/insider-sentiment?symbol=" + sym
+                + "&from=" + fromDate + "&to=" + toDate + "&token=" + finnhubKey)
+                .get(6, TimeUnit.SECONDS);
+            if (insiderResp != null && insiderResp.statusCode() == 200) {
+                JsonNode data = objectMapper.readTree(insiderResp.body()).path("data");
+                if (data.isArray() && data.size() > 0) {
+                    double sum = 0; int cnt = 0;
+                    for (JsonNode item : data) {
+                        double m = item.path("mspr").asDouble(0);
+                        if (m != 0) { sum += m; cnt++; }
+                    }
+                    if (cnt > 0) insiderMspr = sum / cnt;
+                }
+            }
+            // 3. Earnings calendar
+            String eFrom = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+            String eTo   = now.plusDays(14).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+            HttpResponse<String> earningsResp = finnhubAsync(
+                "https://finnhub.io/api/v1/calendar/earnings?from=" + eFrom + "&to=" + eTo
+                + "&symbol=" + sym + "&token=" + finnhubKey)
+                .get(6, TimeUnit.SECONDS);
+            if (earningsResp != null && earningsResp.statusCode() == 200) {
+                JsonNode cal = objectMapper.readTree(earningsResp.body()).path("earningsCalendar");
+                if (cal.isArray() && cal.size() > 0) {
+                    String dateStr = cal.get(0).path("date").asText("");
+                    if (!dateStr.isEmpty()) {
+                        LocalDate ed = LocalDate.parse(dateStr);
+                        int days = (int) now.toLocalDate().until(ed, ChronoUnit.DAYS);
+                        if (days >= 0) earningsDaysAway = days;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return new WheelQuality(analystBuyPct, insiderMspr, earningsDaysAway);
+    }
+
+    // ── Delta approximation (Black-Scholes N(-d1) for OTM put) ───────────────
+    static double putDelta(double price, double strike, double ivAnnual, int daysToExpiry) {
+        if (price <= 0 || strike <= 0 || ivAnnual <= 0 || daysToExpiry <= 0) return 0.25;
+        double T  = daysToExpiry / 365.0;
+        double d1 = Math.log(price / strike) / (ivAnnual * Math.sqrt(T));
+        return normalCdf(-d1); // put delta = N(-d1)
+    }
+
+    private static double normalCdf(double x) {
+        double t = 1.0 / (1.0 + 0.2316419 * Math.abs(x));
+        double poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+        double pdf  = Math.exp(-x * x / 2.0) / Math.sqrt(2.0 * Math.PI);
+        double cdf  = 1.0 - poly * pdf;
+        return x >= 0 ? cdf : 1.0 - cdf;
     }
 }

@@ -76,6 +76,28 @@
         </div>
     </header>
 
+    <div id="market-bar">
+        <div class="mb-index" id="mb-SPY" onclick="submitChip('analyze SPY')" title="S&amp;P 500 ETF">
+            <span class="mb-name">SPY <span class="mb-sub">S&amp;P 500</span></span>
+            <span class="mb-price">…</span>
+            <span class="mb-chg">—</span>
+        </div>
+        <div class="mb-sep"></div>
+        <div class="mb-index" id="mb-QQQ" onclick="submitChip('analyze QQQ')" title="Nasdaq 100 ETF">
+            <span class="mb-name">QQQ <span class="mb-sub">Nasdaq 100</span></span>
+            <span class="mb-price">…</span>
+            <span class="mb-chg">—</span>
+        </div>
+        <div class="mb-sep"></div>
+        <div class="mb-index" id="mb-ES" title="E-mini S&amp;P 500 Futures">
+            <span class="mb-name">/ES <span class="mb-sub">E-mini Future</span></span>
+            <span class="mb-price">…</span>
+            <span class="mb-chg">—</span>
+        </div>
+        <span class="mb-refresh" id="mb-time"></span>
+        <button class="mb-refresh-btn" id="mb-refresh-btn" onclick="manualMbRefresh()" title="Refresh prices">⟳</button>
+    </div>
+
     <div id="chat-window">
         <div class="message agent">
             Hello! I am your AI-Powered Trading Agent. Ask me for live stock prices, multi-timeframe analysis, or a detailed trade plan for any US equity.
