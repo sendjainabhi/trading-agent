@@ -20,8 +20,7 @@ public class UserPrefsService {
 
     private static final Logger log = LoggerFactory.getLogger(UserPrefsService.class);
 
-    private final Path prefsFile = Paths.get(
-            System.getProperty("user.home"), ".alphaquant", "prefs.json");
+    private final Path prefsFile = Paths.get(System.getProperty("user.home"), ".alphaquant", "prefs.json");
     private final ObjectMapper mapper = new ObjectMapper();
     private Prefs prefs = new Prefs();
 

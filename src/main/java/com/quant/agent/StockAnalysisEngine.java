@@ -141,6 +141,14 @@ public class StockAnalysisEngine {
         try { return objectMapper.readTree(json).path("unusual_options_activity").asText("NONE"); } catch (Exception e) { return "NONE"; }
     }
 
+    public double extractVolumeRatio(String json) {
+        try { return objectMapper.readTree(json).path("volume_ratio").asDouble(1.0); } catch (Exception e) { return 1.0; }
+    }
+
+    public String extractBreakoutType(String json) {
+        try { return objectMapper.readTree(json).path("breakout_type").asText("NONE"); } catch (Exception e) { return "NONE"; }
+    }
+
     // ── Core multi-timeframe alignment engine ─────────────────────────────────
 
     /**
@@ -220,6 +228,9 @@ public class StockAnalysisEngine {
         double spy20dReturn = 0.0;
         int compositeTrendScore = 50;
         String compositeTrendLabel = "Neutral";
+        double volumeRatio = 1.0;
+        String breakoutType = "NONE";
+        double high10d = 0.0;
 
         String insiderFrom = nowET.minusMonths(3).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
         String insiderTo   = nowET.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
@@ -328,6 +339,13 @@ public class StockAnalysisEngine {
                     priorDayHigh = tickerNode.get(d1sz - 2).path("h").asDouble();
                     priorDayLow  = tickerNode.get(d1sz - 2).path("l").asDouble();
                 }
+                // 10-day range breakout level — highest high over last 10 completed daily bars
+                if (d1sz >= 12) {
+                    for (int i = d1sz - 11; i < d1sz - 1; i++) {
+                        double h = tickerNode.get(i).path("h").asDouble(0);
+                        if (h > high10d) high10d = h;
+                    }
+                }
                 // 52-week high/low range position (0% = at 52W low, 100% = at 52W high)
                 int barsForYear = Math.min(d1sz, 252);
                 for (int i = d1sz - barsForYear; i < d1sz; i++) {
@@ -428,6 +446,18 @@ public class StockAnalysisEngine {
                                  :                                      "Full Bear";
                 }
             }
+        }
+
+        // Volume ratio and breakout type — derived from D1 data
+        if (avgVolume30d > 0 && totalVolume > 0) {
+            volumeRatio = (double) totalVolume / avgVolume30d;
+        }
+        if ("Bullish Cross".equals(emaCrossoverStatus)) {
+            breakoutType = "FRESH_CROSS";
+        } else if (ema50d > 0 && currentPrice > ema50d && priorClose > 0 && priorClose < ema50d) {
+            breakoutType = "ABOVE_EMA50";
+        } else if (high10d > 0 && currentPrice > high10d) {
+            breakoutType = "RANGE_BREAK";
         }
 
         // ── H1 bars processing ────────────────────────────────────────────────
@@ -992,6 +1022,85 @@ public class StockAnalysisEngine {
             dynamicSl      = currentPrice - premiumWidth;
         }
 
+        // ── Quality Gates (A → B → C) — downgrade-only, applied in order ────────
+        // Each gate can only move the verdict DOWN the conviction ladder; never up.
+
+        // Gate A — RSI Extreme: overbought/oversold circuit breaker
+        // The RSI itself drives the confluence score up → score triggers EXECUTE → RSI is
+        // both the CAUSE and the REASON NOT to chase. Hard-break that self-reinforcing loop.
+        if ("EXECUTE_CALL_OR_LONG_SPREAD".equals(dynamicVerdict) && rsi14 > 80.0) {
+            dynamicVerdict = "PREPARE_LONG_BUY_DIP_AT_VWAP";
+            dynamicEntry   = (vwap > 0 && vwap < currentPrice) ? vwap : currentPrice - (stopDistance * 0.3);
+            dynamicTp      = dynamicEntry + targetDistance;
+            dynamicSl      = dynamicEntry - stopDistance;
+        }
+        if ("EXECUTE_PUT_OR_SHORT_SPREAD".equals(dynamicVerdict) && rsi14 < 20.0) {
+            dynamicVerdict = "PREPARE_SHORT_FADE_BOUNCE_AT_VWAP";
+            dynamicEntry   = (vwap > 0 && vwap > currentPrice) ? vwap : currentPrice + (stopDistance * 0.3);
+            dynamicTp      = dynamicEntry - targetDistance;
+            dynamicSl      = dynamicEntry + stopDistance;
+        }
+
+        // Gate B — ADX Trend Strength: no directional EXECUTE in a ranging/choppy market
+        // ADX < 20 = market is consolidating; directional signals are statistical noise.
+        // ADX < 15 = no reliable trend at all; max verdict is collect premium.
+        if (adxValue < 15.0) {
+            if (!"STAND_DOWN_COLLECT_PREMIUM".equals(dynamicVerdict)) {
+                double premiumWidthB = atr14 > 0 ? atr14 * 0.75 : oneDayExpectedMove;
+                dynamicVerdict = "STAND_DOWN_COLLECT_PREMIUM";
+                dynamicEntry   = currentPrice;
+                dynamicTp      = currentPrice + premiumWidthB;
+                dynamicSl      = currentPrice - premiumWidthB;
+            }
+        } else if (adxValue < 20.0) {
+            if ("EXECUTE_CALL_OR_LONG_SPREAD".equals(dynamicVerdict)) {
+                dynamicVerdict = "PREPARE_LONG_BUY_DIP_AT_VWAP";
+                dynamicEntry   = (vwap > 0 && vwap < currentPrice) ? vwap : currentPrice - (stopDistance * 0.3);
+                dynamicTp      = dynamicEntry + targetDistance;
+                dynamicSl      = dynamicEntry - stopDistance;
+            } else if ("EXECUTE_PUT_OR_SHORT_SPREAD".equals(dynamicVerdict)) {
+                dynamicVerdict = "PREPARE_SHORT_FADE_BOUNCE_AT_VWAP";
+                dynamicEntry   = (vwap > 0 && vwap > currentPrice) ? vwap : currentPrice + (stopDistance * 0.3);
+                dynamicTp      = dynamicEntry - targetDistance;
+                dynamicSl      = dynamicEntry + stopDistance;
+            }
+        }
+
+        // Gate C — Timeframe Agreement: EXECUTE requires at least 2 of 4 timeframes aligned.
+        // If D1 is strongly bullish but H1+M15+M5 all disagree, entering now fights intraday flow.
+        if ("EXECUTE_CALL_OR_LONG_SPREAD".equals(dynamicVerdict) && tfAgreement < 2) {
+            dynamicVerdict = "PREPARE_LONG_BUY_DIP_AT_VWAP";
+            dynamicEntry   = (vwap > 0 && vwap < currentPrice) ? vwap : currentPrice - (stopDistance * 0.3);
+            dynamicTp      = dynamicEntry + targetDistance;
+            dynamicSl      = dynamicEntry - stopDistance;
+        }
+        if ("EXECUTE_PUT_OR_SHORT_SPREAD".equals(dynamicVerdict) && tfAgreement > -2) {
+            dynamicVerdict = "PREPARE_SHORT_FADE_BOUNCE_AT_VWAP";
+            dynamicEntry   = (vwap > 0 && vwap > currentPrice) ? vwap : currentPrice + (stopDistance * 0.3);
+            dynamicTp      = dynamicEntry - targetDistance;
+            dynamicSl      = dynamicEntry + stopDistance;
+        }
+        // ── End quality gates A–C ─────────────────────────────────────────────────
+
+        // Pre-computed timing label — put directly in JSON so template never needs a conditional
+        String timingLabel;
+        switch (dynamicVerdict) {
+            case "EXECUTE_CALL_OR_LONG_SPREAD":
+                timingLabel = String.format("✅ Enter now at market — momentum confirmed, strikes priced at current level ($%.2f)", dynamicEntry);
+                break;
+            case "PREPARE_LONG_BUY_DIP_AT_VWAP":
+                timingLabel = String.format("⏳ Wait until price pulls back to $%.2f — entering at today's $%.2f makes debit strategies expensive", dynamicEntry, currentPrice);
+                break;
+            case "EXECUTE_PUT_OR_SHORT_SPREAD":
+                timingLabel = String.format("✅ Enter now at market — bearish momentum confirmed, strikes priced at current level ($%.2f)", dynamicEntry);
+                break;
+            case "PREPARE_SHORT_FADE_BOUNCE_AT_VWAP":
+                timingLabel = String.format("⏳ Wait until price bounces to $%.2f — entering at today's $%.2f makes debit strategies expensive", dynamicEntry, currentPrice);
+                break;
+            default:
+                timingLabel = "✅ Can enter NOW at market — collecting premium, entry timing is less critical";
+        }
+
         double strikeBuy = IndicatorUtils.getNearestOptionStrike(dynamicEntry);
         double strikeSell = IndicatorUtils.getNearestOptionStrike(dynamicTp);
 
@@ -1251,6 +1360,30 @@ public class StockAnalysisEngine {
             confidenceLabel = confidenceScore >= 75 ? "High" : confidenceScore >= 50 ? "Moderate" : "Low";
         }
 
+        // Gate D — Setup Confidence: EXECUTE requires ≥60% of signals aligned.
+        // Prevents a heavy-weighted single signal (e.g. strong SMA20) pushing score to 72
+        // while most other signals (RSI, MACD, H1, M15, vol) are neutral or opposed.
+        if (confidenceScore < 60) {
+            if ("EXECUTE_CALL_OR_LONG_SPREAD".equals(dynamicVerdict)) {
+                dynamicVerdict = "PREPARE_LONG_BUY_DIP_AT_VWAP";
+                dynamicEntry   = (vwap > 0 && vwap < currentPrice) ? vwap : currentPrice - (stopDistance * 0.3);
+                dynamicTp      = dynamicEntry + targetDistance;
+                dynamicSl      = dynamicEntry - stopDistance;
+                strikeBuy      = IndicatorUtils.getNearestOptionStrike(dynamicEntry);
+                spreadShortStrike = IndicatorUtils.getNearestOptionStrike(strikeBuy + spreadWidth);
+                timingLabel    = String.format("⏳ Wait until price pulls back to $%.2f — entering at today's $%.2f makes debit strategies expensive", dynamicEntry, currentPrice);
+            } else if ("EXECUTE_PUT_OR_SHORT_SPREAD".equals(dynamicVerdict)) {
+                dynamicVerdict = "PREPARE_SHORT_FADE_BOUNCE_AT_VWAP";
+                dynamicEntry   = (vwap > 0 && vwap > currentPrice) ? vwap : currentPrice + (stopDistance * 0.3);
+                dynamicTp      = dynamicEntry - targetDistance;
+                dynamicSl      = dynamicEntry + stopDistance;
+                strikeBuy      = IndicatorUtils.getNearestOptionStrike(dynamicEntry);
+                spreadShortStrike = IndicatorUtils.getNearestOptionStrike(strikeBuy - spreadWidth);
+                timingLabel    = String.format("⏳ Wait until price bounces to $%.2f — entering at today's $%.2f makes debit strategies expensive", dynamicEntry, currentPrice);
+            }
+        }
+        // ── End Gate D ────────────────────────────────────────────────────────────
+
         // Win probability: estimated % chance the trade reaches its target
         // Built from 10 weighted signals (max raw = 40pts → capped to 35–82% realistic range)
         int winProbability = 50;
@@ -1339,7 +1472,9 @@ public class StockAnalysisEngine {
                 + ",\"strategy_a\":\"%s\",\"options_line_a\":\"%s\""
                 + ",\"strategy_b\":\"%s\",\"options_line_b\":\"%s\""
                 + ",\"strategy_c\":\"%s\",\"options_line_c\":\"%s\""
-                + ",\"recommended_strategy\":\"%s\"",
+                + ",\"recommended_strategy\":\"%s\""
+                + ",\"volume_ratio\":%.2f,\"breakout_type\":\"%s\""
+                + ",\"timing_label\":\"%s\"",
                 sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, effectiveCustomDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, spreadShortStrike, strikeSell, targetExpiration, strategyName, optionsLine, emaCrossoverStatus, rsi14, calculatedSupport, calculatedResistance,
                 buyStrength, buyScore, sellScore, rsi14,
                 activeBuySignals, activeSellSignals,
@@ -1374,7 +1509,9 @@ public class StockAnalysisEngine {
                 strategyA, optionsLineA.replace("\"", "'"),
                 strategyB, optionsLineB.replace("\"", "'"),
                 strategyC, optionsLineC.replace("\"", "'"),
-                recommendedStrategy);
+                recommendedStrategy,
+                volumeRatio, breakoutType,
+                timingLabel.replace("\"", "'"));
     }
 
     // ── Single-ticker scan (Yahoo snapshot + full MTF) — cached 30 s ─────────
@@ -1388,48 +1525,63 @@ public class StockAnalysisEngine {
         if (cached != null && Instant.now().minusSeconds(SCAN_CACHE_TTL_SECONDS).isBefore(cached.cachedAt())) {
             return cached.json();
         }
+        double currentPrice = 0, priorClose = 0, highToday = 0, lowToday = 0;
+        long vol = 0;
+
         try {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    .GET()
-                    .build();
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
             HttpResponse<String> res = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-            if (res.statusCode() != 200) return null;
-
-            JsonNode root       = objectMapper.readTree(res.body());
-            JsonNode resultNode = root.path("chart").path("result").get(0);
-            if (resultNode == null || resultNode.isMissingNode()) return null;
-            JsonNode meta = resultNode.path("meta");
-
-            double regularPrice = meta.path("regularMarketPrice").asDouble();
-            double priorClose   = meta.path("chartPreviousClose").asDouble();
-            long   vol          = meta.path("regularMarketVolume").asLong(0);
-            double highToday    = meta.path("regularMarketDayHigh").asDouble(regularPrice);
-            double lowToday     = meta.path("regularMarketDayLow").asDouble(regularPrice);
-
-            double currentPrice = regularPrice;
-            JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
-            if (closes != null && closes.isArray() && !closes.isEmpty()) {
-                for (int i = closes.size() - 1; i >= 0; i--) {
-                    if (!closes.get(i).isNull()) { currentPrice = closes.get(i).asDouble(); break; }
+            if (res.statusCode() == 200) {
+                JsonNode root = objectMapper.readTree(res.body());
+                JsonNode resultNode = root.path("chart").path("result").get(0);
+                if (resultNode != null && !resultNode.isMissingNode()) {
+                    JsonNode meta = resultNode.path("meta");
+                    double regularPrice = meta.path("regularMarketPrice").asDouble();
+                    priorClose  = meta.path("chartPreviousClose").asDouble();
+                    vol         = meta.path("regularMarketVolume").asLong(0);
+                    highToday   = meta.path("regularMarketDayHigh").asDouble(regularPrice);
+                    lowToday    = meta.path("regularMarketDayLow").asDouble(regularPrice);
+                    currentPrice = regularPrice;
+                    JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
+                    if (closes != null && closes.isArray() && !closes.isEmpty()) {
+                        for (int i = closes.size() - 1; i >= 0; i--) {
+                            if (!closes.get(i).isNull()) { currentPrice = closes.get(i).asDouble(); break; }
+                        }
+                    }
                 }
             }
+        } catch (Exception ignored) {}
 
+        // ── Fallback: Alpaca snapshot ─────────────────────────────────────────
+        if (currentPrice <= 0) {
+            try {
+                HttpRequest snapReq = alpacaClient.buildAlpacaRequest("/snapshots?symbols=" + ticker + "&feed=iex");
+                HttpResponse<String> snapRes = alpacaClient.httpClient.send(snapReq, HttpResponse.BodyHandlers.ofString());
+                if (snapRes.statusCode() == 200) {
+                    JsonNode snap = objectMapper.readTree(snapRes.body()).path(ticker);
+                    JsonNode daily = snap.path("dailyBar"); JsonNode prevDay = snap.path("prevDailyBar");
+                    currentPrice = snap.path("latestTrade").path("p").asDouble(daily.path("c").asDouble());
+                    priorClose = prevDay.path("c").asDouble(); vol = daily.path("v").asLong(0);
+                    highToday = daily.path("h").asDouble(currentPrice); lowToday = daily.path("l").asDouble(currentPrice);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // ── Alpaca WebSocket live quote override ──────────────────────────────
+        try {
             currentPrice = alpacaClient.alpacaStreamService.getLatestQuote(ticker)
-                    .map(AlpacaStreamService.LiveQuote::price)
-                    .filter(p -> p > 0)
-                    .orElse(currentPrice);
+                    .map(AlpacaStreamService.LiveQuote::price).filter(p -> p > 0).orElse(currentPrice);
+        } catch (Exception ignored) {}
 
-            if (currentPrice <= 0) return null;
-
+        if (currentPrice <= 0) return null;
+        try {
             double percentChange = (priorClose > 0) ? ((currentPrice - priorClose) / priorClose) * 100.0 : 0.0;
             String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
-
             String mtf  = processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, 0);
             String base = String.format("{\"symbol\":\"%s\",\"current_price\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\"}",
                     ticker, currentPrice, pctString, String.format("%,d", vol));
-            // mtf starts with a comma — strip the closing brace from base and append
             String result = base.substring(0, base.length() - 1) + mtf + "}";
             scanCache.put(ticker, new CachedScan(result, Instant.now()));
             return result;
@@ -1442,65 +1594,77 @@ public class StockAnalysisEngine {
 
     /** Fetches pre-market bars for a ticker and returns a JSON result, or null if no significant activity. */
     public String scanPreMarketTicker(String ticker) {
+        double priorClose = 0, preMarketPrice = 0, pmHigh = 0, pmLow = Double.MAX_VALUE;
+        long totalPreVolume = 0;
+        List<double[]> preBars = new ArrayList<>();
+
         try {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=5m&range=1d"))
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    .timeout(Duration.ofSeconds(6))
-                    .GET().build();
+                    .timeout(Duration.ofSeconds(6)).GET().build();
             HttpResponse<String> res = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-            if (res.statusCode() != 200) return null;
-
-            JsonNode root = objectMapper.readTree(res.body());
-            JsonNode resultNode = root.path("chart").path("result").get(0);
-            if (resultNode == null || resultNode.isMissingNode()) return null;
-
-            JsonNode meta = resultNode.path("meta");
-            double priorClose = meta.path("chartPreviousClose").asDouble();
-            if (priorClose <= 0) return null;
-
-            // Regular session start timestamp (Unix seconds) for today — bars before this are pre-market
-            long marketOpenTs = meta.path("currentTradingPeriod").path("regular").path("start").asLong(Long.MAX_VALUE);
-
-            JsonNode timestamps = resultNode.path("timestamp");
-            JsonNode quoteNode  = resultNode.path("indicators").path("quote").get(0);
-            JsonNode closesArr  = quoteNode.path("close");
-            JsonNode opensArr   = quoteNode.path("open");
-            JsonNode volumesArr = quoteNode.path("volume");
-
-            if (!timestamps.isArray() || timestamps.size() == 0) return null;
-
-            List<double[]> preBars = new ArrayList<>(); // [open, close]
-            long totalPreVolume = 0;
-            double pmHigh = 0, pmLow = Double.MAX_VALUE;
-
-            for (int i = 0; i < timestamps.size(); i++) {
-                long ts = timestamps.get(i).asLong();
-                if (ts >= marketOpenTs) break;
-                if (i >= closesArr.size() || i >= opensArr.size()) break;
-                double c = closesArr.get(i).asDouble(0);
-                double o = opensArr.get(i).asDouble(0);
-                long v  = (i < volumesArr.size()) ? volumesArr.get(i).asLong(0) : 0;
-                if (c > 0 && o > 0) {
-                    preBars.add(new double[]{o, c});
-                    totalPreVolume += v;
-                    if (c > pmHigh) pmHigh = c;
-                    if (c < pmLow)  pmLow  = c;
+            if (res.statusCode() == 200) {
+                JsonNode root = objectMapper.readTree(res.body());
+                JsonNode resultNode = root.path("chart").path("result").get(0);
+                if (resultNode != null && !resultNode.isMissingNode()) {
+                    JsonNode meta = resultNode.path("meta");
+                    priorClose = meta.path("chartPreviousClose").asDouble();
+                    long marketOpenTs = meta.path("currentTradingPeriod").path("regular").path("start").asLong(Long.MAX_VALUE);
+                    JsonNode timestamps = resultNode.path("timestamp");
+                    JsonNode quoteNode  = resultNode.path("indicators").path("quote").get(0);
+                    JsonNode closesArr  = quoteNode.path("close");
+                    JsonNode opensArr   = quoteNode.path("open");
+                    JsonNode volumesArr = quoteNode.path("volume");
+                    if (timestamps.isArray() && timestamps.size() > 0) {
+                        for (int i = 0; i < timestamps.size(); i++) {
+                            if (timestamps.get(i).asLong() >= marketOpenTs) break;
+                            if (i >= closesArr.size() || i >= opensArr.size()) break;
+                            double c = closesArr.get(i).asDouble(0);
+                            double o = opensArr.get(i).asDouble(0);
+                            long v   = (i < volumesArr.size()) ? volumesArr.get(i).asLong(0) : 0;
+                            if (c > 0 && o > 0) {
+                                preBars.add(new double[]{o, c});
+                                totalPreVolume += v;
+                                if (c > pmHigh) pmHigh = c;
+                                if (c < pmLow)  pmLow  = c;
+                            }
+                        }
+                        if (!preBars.isEmpty()) preMarketPrice = preBars.get(preBars.size() - 1)[1];
+                    }
                 }
             }
+        } catch (Exception ignored) {}
 
-            if (preBars.isEmpty()) return null;
+        // ── Fallback: Alpaca snapshot ─────────────────────────────────────────
+        if (priorClose <= 0 || preBars.isEmpty()) {
+            try {
+                HttpRequest snapReq = alpacaClient.buildAlpacaRequest("/snapshots?symbols=" + ticker + "&feed=iex");
+                HttpResponse<String> snapRes = alpacaClient.httpClient.send(snapReq, HttpResponse.BodyHandlers.ofString());
+                if (snapRes.statusCode() == 200) {
+                    JsonNode snap = objectMapper.readTree(snapRes.body()).path(ticker);
+                    priorClose = snap.path("prevDailyBar").path("c").asDouble();
+                    double latestPrice = snap.path("latestTrade").path("p").asDouble(snap.path("dailyBar").path("c").asDouble());
+                    if (latestPrice > 0 && priorClose > 0) {
+                        preMarketPrice = latestPrice;
+                        totalPreVolume = snap.path("dailyBar").path("v").asLong(10_000);
+                        pmHigh = snap.path("dailyBar").path("h").asDouble(latestPrice * 1.005);
+                        pmLow  = snap.path("dailyBar").path("l").asDouble(latestPrice * 0.995);
+                        preBars.add(new double[]{priorClose, preMarketPrice});
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
 
-            double preMarketPrice  = preBars.get(preBars.size() - 1)[1];
+        try {
+            if (preBars.isEmpty() || priorClose <= 0) return null;
             double pmChangePercent = ((preMarketPrice - priorClose) / priorClose) * 100.0;
-
             if (Math.abs(pmChangePercent) < 0.5 && totalPreVolume < 5_000) return null;
             if (preMarketPrice < 5.0) return null;
 
             String pattern = detectPreMarketPattern(preBars, pmChangePercent, priorClose);
-
-            if (pmHigh <= 0)             pmHigh = preMarketPrice * 1.005;
-            if (pmLow == Double.MAX_VALUE) pmLow = preMarketPrice * 0.995;
+            if (pmHigh <= 0)              pmHigh = preMarketPrice * 1.005;
+            if (pmLow == Double.MAX_VALUE) pmLow  = preMarketPrice * 0.995;
 
             String mtf      = processIntradayMtfAlignment(ticker, preMarketPrice, pmHigh, pmLow, totalPreVolume, priorClose, 0);
             String pctString = String.format("%s%.2f%%", pmChangePercent >= 0 ? "+" : "", pmChangePercent);
@@ -1557,51 +1721,62 @@ public class StockAnalysisEngine {
         if (cached != null && Instant.now().minusSeconds(ANALYSIS_CACHE_TTL_SECONDS).isBefore(cached.cachedAt())) {
             return cached.json();
         }
+        double currentPrice = 0, priorClose = 0, highToday = 0, lowToday = 0;
+        long vol = 0;
+
         try {
             HttpRequest liveRequest = HttpRequest.newBuilder()
                     .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    .GET()
-                    .build();
-
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
             HttpResponse<String> res = alpacaClient.httpClient.send(liveRequest, HttpResponse.BodyHandlers.ofString());
-            if (res.statusCode() != 200) return String.format("{\"error\":\"CRITICAL FAILURE: Public Gateway Offline for %s.\"}", ticker);
-
-            JsonNode root = objectMapper.readTree(res.body());
-            JsonNode resultNode = root.path("chart").path("result").get(0);
-            JsonNode meta = resultNode.path("meta");
-
-            double regularPrice = meta.path("regularMarketPrice").asDouble();
-            double priorClose = meta.path("chartPreviousClose").asDouble();
-            long vol = meta.path("regularMarketVolume").asLong(0);
-            double highToday = meta.path("regularMarketDayHigh").asDouble(regularPrice);
-            double lowToday = meta.path("regularMarketDayLow").asDouble(regularPrice);
-
-            // Seed from Yahoo meta; then refine from the 1-minute bar array (includes pre/post hours)
-            double currentPrice = regularPrice;
-
-            JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
-            if (closes != null && closes.isArray() && !closes.isEmpty()) {
-                for (int i = closes.size() - 1; i >= 0; i--) {
-                    if (!closes.get(i).isNull()) {
-                        currentPrice = closes.get(i).asDouble();
-                        break;
+            if (res.statusCode() == 200) {
+                JsonNode root = objectMapper.readTree(res.body());
+                JsonNode resultNode = root.path("chart").path("result").get(0);
+                if (resultNode != null && !resultNode.isMissingNode()) {
+                    JsonNode meta = resultNode.path("meta");
+                    double regularPrice = meta.path("regularMarketPrice").asDouble();
+                    priorClose = meta.path("chartPreviousClose").asDouble();
+                    vol        = meta.path("regularMarketVolume").asLong(0);
+                    highToday  = meta.path("regularMarketDayHigh").asDouble(regularPrice);
+                    lowToday   = meta.path("regularMarketDayLow").asDouble(regularPrice);
+                    currentPrice = regularPrice;
+                    JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
+                    if (closes != null && closes.isArray() && !closes.isEmpty()) {
+                        for (int i = closes.size() - 1; i >= 0; i--) {
+                            if (!closes.get(i).isNull()) { currentPrice = closes.get(i).asDouble(); break; }
+                        }
                     }
                 }
             }
+        } catch (Exception ignored) {}
 
-            // If the WebSocket stream has a fresher quote (< 30 s old), use it as the price
+        // ── Fallback: Alpaca snapshot ─────────────────────────────────────────
+        if (currentPrice <= 0) {
+            try {
+                HttpRequest snapReq = alpacaClient.buildAlpacaRequest("/snapshots?symbols=" + ticker + "&feed=iex");
+                HttpResponse<String> snapRes = alpacaClient.httpClient.send(snapReq, HttpResponse.BodyHandlers.ofString());
+                if (snapRes.statusCode() == 200) {
+                    JsonNode snap = objectMapper.readTree(snapRes.body()).path(ticker);
+                    JsonNode daily = snap.path("dailyBar"); JsonNode prevDay = snap.path("prevDailyBar");
+                    currentPrice = snap.path("latestTrade").path("p").asDouble(daily.path("c").asDouble());
+                    priorClose = prevDay.path("c").asDouble(); vol = daily.path("v").asLong(0);
+                    highToday = daily.path("h").asDouble(currentPrice); lowToday = daily.path("l").asDouble(currentPrice);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // ── Alpaca WebSocket live quote override ──────────────────────────────
+        try {
             currentPrice = alpacaClient.alpacaStreamService.getLatestQuote(ticker)
-                    .map(AlpacaStreamService.LiveQuote::price)
-                    .filter(p -> p > 0)
-                    .orElse(currentPrice);
+                    .map(AlpacaStreamService.LiveQuote::price).filter(p -> p > 0).orElse(currentPrice);
+        } catch (Exception ignored) {}
 
+        if (currentPrice <= 0) return String.format("{\"error\":\"CRITICAL FAILURE: Public Gateway Offline for %s.\"}", ticker);
+        try {
             double percentChange = (priorClose > 0) ? ((currentPrice - priorClose) / priorClose) * 100.0 : 0.0;
             String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
-
             String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\",\"high_today\":%.2f,\"low_today\":%.2f}",
                     ticker, ticker, currentPrice, currentPrice - priorClose, pctString, String.format("%,d", vol), highToday, lowToday);
-
             String result = payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, customDays) + "}";
             analysisCache.put(cacheKey, new CachedScan(result, Instant.now()));
             return result;

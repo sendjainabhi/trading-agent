@@ -29,6 +29,9 @@ AlphaQuant is a personal AI trading assistant that connects to live market data,
 | 🏷️ Ticker Badge | Analysis responses are tagged with a [SYMBOL] pill |
 | 📉 TradingView Chart | Embedded interactive chart — expand / collapse per ticker |
 | ⚠️ Earnings Safety | When earnings are within 10 days, trade cards automatically switch to Iron Condor / stand-aside mode |
+| 🔥 Breakout Detection | Scanners detect FRESH_CROSS (EMA bullish cross), ABOVE_EMA50 (crossed EMA50 today), RANGE_BREAK (10-day high break) |
+| 📡 Sector ETF Drill-Down | When CIBR/SMH/XLF/XLE/XBI/ARKK moves >1.5%, its top 10 stocks are automatically added to every scanner universe |
+| 🛡️ 4-Gate Entry Algorithm | Multi-factor circuit breakers prevent chasing extended moves (see algorithm section below) |
 
 ---
 
@@ -263,6 +266,102 @@ WHAT TO DO — [Buy / Sell / Hold]
 💰 Option C — Bull Put Credit Spread / Bear Call Credit Spread
 Est. Win Rate: 67% (Moderate-High)
 ```
+
+---
+
+## 🛡️ Verdict Algorithm — 4-Gate Quality System
+
+Every trade analysis passes through a sequential gate system before an entry verdict is issued. Gates fire in order; a gate that fires overrides any verdict set by the core confluence score.
+
+### Core Confluence Score
+
+`totalConfluenceScore` is a weighted average of 6 inputs:
+
+| Input | Weight | Notes |
+|---|---|---|
+| Daily trend alignment | 40% | Bullish/Bearish/Neutral |
+| Intraday trend alignment | 20% | 1h + 15m direction |
+| VWAP position | 15% | Above/below session VWAP |
+| RSI momentum | 15% | Scaled 0–100 |
+| Volume confirmation | 5% | Relative to 30-day avg |
+| ADX strength | 5% | Trend conviction |
+
+Score ≥ 70 → `EXECUTE` verdict | Score 45–69 → `PREPARE` (wait for pullback) | Score < 45 → `STAND_DOWN`
+
+### Gate A — RSI Extreme Circuit Breaker
+
+Prevents chasing overbought/oversold extremes.
+
+- `EXECUTE_CALL_OR_LONG_SPREAD` + RSI > 80 → downgraded to `PREPARE_LONG_BUY_DIP_AT_VWAP`
+- `EXECUTE_PUT_OR_SHORT_SPREAD` + RSI < 20 → downgraded to `PREPARE_SHORT_FADE_BOUNCE_AT_VWAP`
+- Entry recalculated to VWAP (or current price ± 30% of stop distance)
+
+**Why:** A high RSI is itself the reason the confluence score is high. Without this gate, RSI 82 drives score to 75 → triggers EXECUTE — the very signal that says "don't chase" causes the chase signal.
+
+### Gate B — ADX Trend Strength
+
+Prevents trading in trendless chop.
+
+- ADX < 15 → forced to `STAND_DOWN_COLLECT_PREMIUM` regardless of direction
+- ADX 15–20 + EXECUTE → downgraded to `PREPARE` (weak trend, wait for confirmation)
+- ADX ≥ 20 + EXECUTE → no change
+
+### Gate C — Timeframe Agreement
+
+Requires multi-timeframe alignment before immediate entry.
+
+- `EXECUTE_CALL` + fewer than 2 timeframes bullish → downgraded to `PREPARE`
+- `EXECUTE_PUT` + fewer than 2 timeframes bearish (i.e., `tfAgreement > -2`) → downgraded to `PREPARE`
+
+`tfAgreement` counts aligned timeframes (Daily, 1h, 15m, 5m each contribute ±1), range −4 to +4.
+
+### Gate D — Confidence Score
+
+Final check: requires signal consensus across 8 binary signals.
+
+- `confidenceScore < 60%` + EXECUTE → downgraded to PREPARE
+- Recalculates entry, strikes, spread strikes, and `timingLabel` to match the new PREPARE verdict
+
+### Pre-Computed Entry Timing Label
+
+`timingLabel` is computed in Java from the final (post-gate) verdict and embedded as a string in the JSON payload. The AI reads and renders it verbatim — no conditional evaluation happens in the response.
+
+| Verdict | timingLabel |
+|---|---|
+| EXECUTE_CALL_OR_LONG_SPREAD | ✅ Enter now at market — momentum confirmed |
+| PREPARE_LONG_BUY_DIP_AT_VWAP | ⏳ Wait until price pulls back to $X.XX |
+| EXECUTE_PUT_OR_SHORT_SPREAD | ✅ Enter now at market — bearish momentum confirmed |
+| PREPARE_SHORT_FADE_BOUNCE_AT_VWAP | ⏳ Wait until price bounces to $X.XX |
+| STAND_DOWN_COLLECT_PREMIUM | ✅ Can enter NOW — collecting premium, timing less critical |
+
+---
+
+## 🔥 Scanner — Sector ETF Drill-Down
+
+Yahoo Finance screeners only return ~15 symbols by raw volume, dominated by mega-caps. Cybersecurity (CRWD, PANW), semis (MU, KLAC), and biotech names rarely surface naturally.
+
+**How it works:** When any sector ETF moves > 1.5% intraday, its top 10 holdings are automatically added to every scanner's universe for that run.
+
+| ETF | Sector | Holdings added |
+|---|---|---|
+| CIBR | Cybersecurity | CRWD, PANW, FTNT, ZS, S, OKTA, CYBR, TENB, CRDO, NET |
+| SMH | Semiconductors | NVDA, AVGO, MU, AMAT, KLAC, LRCX, ON, MRVL, QCOM, AMD |
+| XLF | Financials | JPM, BAC, GS, WFC, MS, C, V, MA, BLK, SCHW |
+| XLE | Energy | XOM, CVX, COP, SLB, OXY, PSX, VLO, MPC, EOG, HAL |
+| XBI | Biotech | MRNA, BNTX, REGN, VRTX, GILD, BIIB, EXAS, IONS, PCVX |
+| ARKK | Innovation | TSLA, COIN, RBLX, PATH, EXAS, TWLO, ROKU, SQ, HOOD |
+
+### Composite Rank Score
+
+Scanner results are sorted by `compositeRankScore` = confluence + volume bonus + breakout bonus.
+
+| Signal | Bonus |
+|---|---|
+| Volume ratio ≥ 2× 30-day avg | +10 |
+| Volume ratio 1.5–2× | +5 |
+| Breakout: FRESH_CROSS (EMA bullish cross today) | +20 |
+| Breakout: ABOVE_EMA50 (crossed above 50-day EMA today) | +15 |
+| Breakout: RANGE_BREAK (above 10-day high) | +10 |
 
 ---
 

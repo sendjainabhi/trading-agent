@@ -1,0 +1,41 @@
+---
+applications:
+  - name: trading-agent
+    path: target/trading-agent-0.0.1-SNAPSHOT.jar
+    buildpacks:
+      - java_buildpack_offline
+    memory: 1G
+    disk_quota: 1G
+    instances: 1
+    health-check-type: http
+    health-check-http-endpoint: /api/model/status
+    timeout: 120
+
+    env:
+      # ── JVM ────────────────────────────────────────────────────────────────
+      JBP_CONFIG_OPEN_JDK_JRE: '{ jre: { version: 17.+ } }'
+      JAVA_OPTS: >-
+        -Xmx768m
+        -Xms256m
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=200
+        -Djava.security.egd=file:/dev/./urandom
+
+      # ── Spring Boot ────────────────────────────────────────────────────────
+      SPRING_PROFILES_ACTIVE: cloud
+
+      # ── Persistent Storage ─────────────────────────────────────────────────
+      # Directory where prefs.json (watchlist, theme, model config, journal) is stored.
+      # On CF, bind an NFS volume service and point this to its mount path so data
+      # survives redeployments. Without a volume service, data persists across
+      # restarts but is wiped on cf push.
+      #
+      # Example with CF NFS volume service mounted at /var/watchlist:
+      #   PREFS_DATA_DIR: /var/watchlist
+      #
+      # Leave unset to use the default local path (~/.alphaquant/)
+      # PREFS_DATA_DIR: /var/watchlist
+
+      # ── AI Provider ────────────────────────────────────────────────────────
+      # Model, API key, and base URL are configured at runtime via the GUI
+      # (Settings → Upload Config File using bc-gto-config-model.properties)

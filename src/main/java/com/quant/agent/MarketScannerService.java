@@ -40,6 +40,64 @@ public class MarketScannerService {
         this.alpacaStreamService = alpacaStreamService;
     }
 
+    // ── Sector ETF drill-down — when a sector ETF moves >1.5%, add its top stocks ─
+
+    private static final Map<String, List<String>> SECTOR_ETF_HOLDINGS = Map.of(
+        "CIBR", List.of("CRWD","PANW","FTNT","ZS","S","OKTA","CYBR","TENB","CRDO","NET"),
+        "SMH",  List.of("NVDA","AVGO","MU","AMAT","KLAC","LRCX","ON","MRVL","QCOM","AMD"),
+        "XLF",  List.of("JPM","BAC","GS","WFC","MS","C","V","MA","BLK","SCHW"),
+        "XLE",  List.of("XOM","CVX","COP","SLB","OXY","PSX","VLO","MPC","EOG","HAL"),
+        "XBI",  List.of("MRNA","BNTX","REGN","VRTX","GILD","BIIB","EXAS","IONS","PCVX"),
+        "ARKK", List.of("TSLA","COIN","RBLX","PATH","EXAS","TWLO","ROKU","SQ","HOOD")
+    );
+
+    private List<String> fetchSectorExpansion() {
+        java.util.concurrent.CopyOnWriteArrayList<String> found = new java.util.concurrent.CopyOnWriteArrayList<>();
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        for (Map.Entry<String, List<String>> entry : SECTOR_ETF_HOLDINGS.entrySet()) {
+            futures.add(CompletableFuture.runAsync(() -> {
+                try {
+                    HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/"
+                            + entry.getKey() + "?interval=1d&range=2d"))
+                        .header("User-Agent", "Mozilla/5.0")
+                        .timeout(java.time.Duration.ofSeconds(5)).GET().build();
+                    HttpResponse<String> resp = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                    if (resp.statusCode() == 200) {
+                        JsonNode meta = alpacaClient.objectMapper.readTree(resp.body())
+                            .path("chart").path("result").get(0).path("meta");
+                        double price = meta.path("regularMarketPrice").asDouble(0);
+                        double prev  = meta.path("chartPreviousClose").asDouble(0);
+                        if (price > 0 && prev > 0 && Math.abs((price - prev) / prev * 100.0) >= 1.5) {
+                            found.addAll(entry.getValue());
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }));
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        List<String> expansion = new ArrayList<>();
+        for (String sym : found) {
+            if (!expansion.contains(sym)) {
+                expansion.add(sym);
+                alpacaStreamService.subscribe(sym);
+            }
+        }
+        return expansion;
+    }
+
+    /** Composite rank: confluence + volume bonus + breakout bonus */
+    private double compositeRankScore(String result) {
+        double confluence  = engine.extractConfluenceScore(result);
+        double volRatio    = engine.extractVolumeRatio(result);
+        String breakout    = engine.extractBreakoutType(result);
+        double volBonus    = volRatio >= 2.0 ? 10.0 : volRatio >= 1.5 ? 5.0 : 0.0;
+        double brkBonus    = "FRESH_CROSS".equals(breakout) ? 20.0
+                           : "ABOVE_EMA50".equals(breakout) ? 15.0
+                           : "RANGE_BREAK".equals(breakout) ? 10.0 : 0.0;
+        return confluence + volBonus + brkBonus;
+    }
+
     // ── Shared screener fetch helper ──────────────────────────────────────────
 
     /**
@@ -55,33 +113,43 @@ public class MarketScannerService {
     private List<String> fetchScreenerTickers(String[] screenerIds, int targetSize,
                                                int perPage, long minVolume) throws Exception {
         List<String> tickers = new ArrayList<>();
+
+        // ── Yahoo Finance screener ─────────────────────────────────────────────
         for (String scrId : screenerIds) {
             if (tickers.size() >= targetSize) break;
-            String url = scrId.equals("trending")
-                    ? "https://query1.finance.yahoo.com/v1/finance/trending/US"
-                    : "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds="
-                      + scrId + "&count=" + perPage + "&fields=symbol,regularMarketPrice,regularMarketVolume";
-            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url))
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
-            HttpResponse<String> resp = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() != 200) continue;
-            JsonNode quotes = alpacaClient.objectMapper.readTree(resp.body())
-                    .path("finance").path("result").get(0).path("quotes");
-            if (!quotes.isArray()) continue;
-            for (JsonNode q : quotes) {
-                if (tickers.size() >= targetSize) break;
-                String sym   = q.path("symbol").asText("").trim();
-                double price = q.path("regularMarketPrice").asDouble(0);
-                long   vol   = q.path("regularMarketVolume").asLong(0);
-                if (sym.isBlank() || sym.contains("-") || sym.contains(".")) continue;
-                if (price > 0 && price < 5.0) continue;
-                if (vol > 0 && vol < minVolume) continue;
-                if (!tickers.contains(sym)) {
-                    tickers.add(sym);
-                    alpacaStreamService.subscribe(sym);
+            try {
+                String url = scrId.equals("trending")
+                        ? "https://query1.finance.yahoo.com/v1/finance/trending/US"
+                        : "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds="
+                          + scrId + "&count=" + perPage + "&fields=symbol,regularMarketPrice,regularMarketVolume";
+                HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url))
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
+                HttpResponse<String> resp = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    JsonNode quotes = alpacaClient.objectMapper.readTree(resp.body())
+                            .path("finance").path("result").get(0).path("quotes");
+                    if (quotes.isArray()) {
+                        for (JsonNode q : quotes) {
+                            if (tickers.size() >= targetSize) break;
+                            String sym   = q.path("symbol").asText("").trim();
+                            double price = q.path("regularMarketPrice").asDouble(0);
+                            long   vol   = q.path("regularMarketVolume").asLong(0);
+                            if (sym.isBlank() || sym.contains("-") || sym.contains(".")) continue;
+                            if (price > 0 && price < 5.0) continue;
+                            if (vol > 0 && vol < minVolume) continue;
+                            if (!tickers.contains(sym)) { tickers.add(sym); alpacaStreamService.subscribe(sym); }
+                        }
+                    }
                 }
-            }
+            } catch (Exception ignored) {}
         }
+        // Sector ETF drill-down: when a sector moves >1.5% add its top holdings
+        try {
+            List<String> sectorStocks = fetchSectorExpansion();
+            for (String sym : sectorStocks) {
+                if (!tickers.contains(sym)) { tickers.add(sym); }
+            }
+        } catch (Exception ignored) {}
         return tickers;
     }
 
@@ -129,13 +197,13 @@ public class MarketScannerService {
 
     public String scanMarket() throws Exception {
         List<String> tickers = fetchScreenerTickers(
-                new String[]{"most_actives", "trending"}, 8, 15, 300_000L);
+                new String[]{"most_actives", "trending"}, 8, 15, 1_000_000L);
         if (tickers.isEmpty()) return "{\"error\":\"No eligible tickers found.\"}";
 
         List<String> results = runConcurrentScan(tickers);
         results.sort((a, b) -> Double.compare(
-                Math.abs(engine.extractConfluenceScore(b)),
-                Math.abs(engine.extractConfluenceScore(a))));
+                Math.abs(compositeRankScore(b)),
+                Math.abs(compositeRankScore(a))));
         return buildScanResponse(results.subList(0, Math.min(5, results.size())), "scan_results");
     }
 
@@ -146,14 +214,12 @@ public class MarketScannerService {
      */
     public String scanBearish() throws Exception {
         List<String> tickers = fetchScreenerTickers(
-                new String[]{"day_losers", "most_actives"}, 8, 15, 300_000L);
+                new String[]{"day_losers", "most_actives"}, 8, 15, 1_000_000L);
         if (tickers.isEmpty()) return "{\"error\":\"No eligible tickers found.\"}";
 
         List<String> results = runConcurrentScan(tickers);
         results.removeIf(r -> engine.extractConfluenceScore(r) >= 0);
-        results.sort((a, b) -> Double.compare(
-                engine.extractConfluenceScore(a),
-                engine.extractConfluenceScore(b)));
+        results.sort((a, b) -> Double.compare(compositeRankScore(a), compositeRankScore(b)));
         return buildScanResponse(results.subList(0, Math.min(5, results.size())), "scan_results");
     }
 
@@ -164,14 +230,12 @@ public class MarketScannerService {
      */
     public String scanBullish() throws Exception {
         List<String> tickers = fetchScreenerTickers(
-                new String[]{"day_gainers", "most_actives"}, 8, 15, 300_000L);
+                new String[]{"day_gainers", "most_actives"}, 8, 15, 1_000_000L);
         if (tickers.isEmpty()) return "{\"error\":\"No eligible tickers found.\"}";
 
         List<String> results = runConcurrentScan(tickers);
         results.removeIf(r -> engine.extractConfluenceScore(r) <= 0);
-        results.sort((a, b) -> Double.compare(
-                engine.extractConfluenceScore(b),
-                engine.extractConfluenceScore(a)));
+        results.sort((a, b) -> Double.compare(compositeRankScore(b), compositeRankScore(a)));
         return buildScanResponse(results.subList(0, Math.min(5, results.size())), "scan_results");
     }
 
@@ -179,11 +243,11 @@ public class MarketScannerService {
 
     /**
      * Swing scan: most-actives + gainers + losers, keeps tickers with SWING_LONG/SHORT/RANGE_PLAY signals.
-     * Uses a higher min-volume threshold (500K) to ensure sufficient liquidity for swing entries.
+     * Uses a min-volume threshold of 1M to ensure sufficient liquidity for swing entries.
      */
     public String scanSwing() throws Exception {
         List<String> tickers = fetchScreenerTickers(
-                new String[]{"most_actives", "day_gainers", "day_losers"}, 15, 20, 500_000L);
+                new String[]{"most_actives", "day_gainers", "day_losers"}, 15, 20, 1_000_000L);
         if (tickers.isEmpty()) return "{\"error\":\"No eligible tickers found.\"}";
 
         List<String> results = runConcurrentScan(tickers);
@@ -193,7 +257,8 @@ public class MarketScannerService {
             String sigB = engine.extractSwingSignal(b);
             int rankA = "RANGE_PLAY".equals(sigA) ? 2 : "SWING_LONG".equals(sigA) ? 0 : 1;
             int rankB = "RANGE_PLAY".equals(sigB) ? 2 : "SWING_LONG".equals(sigB) ? 0 : 1;
-            return Integer.compare(rankA, rankB);
+            if (rankA != rankB) return Integer.compare(rankA, rankB);
+            return Double.compare(compositeRankScore(b), compositeRankScore(a));
         });
         return buildScanResponse(results.subList(0, Math.min(6, results.size())), "swing_scan_results");
     }
@@ -209,6 +274,10 @@ public class MarketScannerService {
                 "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "AMD",
                 "AVGO", "NFLX", "JPM", "BAC", "GS", "XOM", "PLTR", "ARM", "MSTR", "COIN",
                 "SOFI", "RIVN", "F", "GE", "INTC", "MU", "SMCI", "UBER", "HOOD", "DIS",
+                // Cybersecurity
+                "CRWD", "PANW", "FTNT", "ZS", "S", "OKTA", "NET",
+                // Semis
+                "AMAT", "KLAC", "LRCX", "ON", "MRVL", "QCOM",
                 "TSLL", "NVDL", "AAPU", "METU", "AMZU", "MSFU", "CONL", "MSTU",
                 "TQQQ", "SPXL", "SOXL", "LABU", "FNGU"
         ));
@@ -911,10 +980,16 @@ public class MarketScannerService {
         List<String> universe = new ArrayList<>(List.of(
                 "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD","NFLX","INTC",
                 "AVGO","MU","QCOM","COIN","PLTR","UBER","SOFI","ARM","MSTR","HOOD",
-                "F","GE","DIS","SMCI","RIVN","BAC","JPM","XOM","CVX","SBUX"
+                "F","GE","DIS","SMCI","RIVN","BAC","JPM","XOM","CVX","SBUX",
+                // Cybersecurity
+                "CRWD","PANW","FTNT","ZS","S","OKTA","CYBR","NET","TENB",
+                // Semis
+                "AMAT","KLAC","LRCX","ON","MRVL","ASML",
+                // Biotech
+                "MRNA","BNTX","REGN","VRTX","GILD","IONS"
         ));
         List<String> screenerTickers = fetchScreenerTickers(
-                new String[]{"most_actives", "day_gainers", "day_losers"}, 12, 20, 300_000L);
+                new String[]{"most_actives", "day_gainers", "day_losers"}, 12, 20, 1_000_000L);
         for (String t : screenerTickers) if (!universe.contains(t)) universe.add(t);
 
         List<String> results = runConcurrentScan(universe);
@@ -940,10 +1015,16 @@ public class MarketScannerService {
         List<String> candidates = new ArrayList<>(List.of(
                 "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD","NFLX","INTC",
                 "JPM","BAC","GS","MS","WFC","XOM","CVX","UNH","LLY","PFE",
-                "AVGO","MU","QCOM","CRM","NOW","PLTR","UBER","COIN","MSTR","ARM"
+                "AVGO","MU","QCOM","CRM","NOW","PLTR","UBER","COIN","MSTR","ARM",
+                // Cybersecurity
+                "CRWD","PANW","FTNT","ZS","S","OKTA","CYBR","NET",
+                // Semis
+                "AMAT","KLAC","LRCX","ON","MRVL",
+                // Biotech
+                "MRNA","BNTX","REGN","VRTX","GILD","BIIB"
         ));
         List<String> screenerTickers = fetchScreenerTickers(
-                new String[]{"most_actives", "day_gainers"}, 10, 20, 300_000L);
+                new String[]{"most_actives", "day_gainers"}, 10, 20, 1_000_000L);
         for (String t : screenerTickers) if (!candidates.contains(t)) candidates.add(t);
 
         List<String> results = runConcurrentScan(candidates);
@@ -972,7 +1053,7 @@ public class MarketScannerService {
      */
     public String scanFailedBreakdown() throws Exception {
         List<String> tickers = fetchScreenerTickers(
-                new String[]{"day_losers", "most_actives", "day_gainers"}, 18, 20, 300_000L);
+                new String[]{"day_losers", "most_actives", "day_gainers"}, 18, 20, 1_000_000L);
         if (tickers.isEmpty()) return "{\"error\":\"No eligible tickers found.\"}";
 
         List<String> results = runConcurrentScan(tickers);
@@ -982,8 +1063,7 @@ public class MarketScannerService {
             boolean isOversold  = engine.extractRsi14d(r) < 40.0;
             return !(isSwingLong && (hasBullDiv || isOversold));
         });
-        results.sort((a, b) -> Double.compare(
-                engine.extractConfluenceScore(b), engine.extractConfluenceScore(a)));
+        results.sort((a, b) -> Double.compare(compositeRankScore(b), compositeRankScore(a)));
         if (results.isEmpty()) return "{\"status\":\"success\",\"ticker_count\":0,\"failed_breakdown_results\":[]}";
         return buildScanResponse(results.subList(0, Math.min(5, results.size())), "failed_breakdown_results");
     }

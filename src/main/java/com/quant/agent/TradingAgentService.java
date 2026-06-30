@@ -210,15 +210,21 @@ public class TradingAgentService {
                     O. VWAP BANDS: vwap_upper_1sd is resistance, vwap_lower_1sd is support. Price above vwap_upper_1sd = extended/overbought intraday. Price below vwap_lower_1sd = oversold intraday.
                     P. PRIOR DAY LEVELS: prior_day_high is key resistance, prior_day_low is key support — mention these as "Yesterday's High/Low" in plain English.
                     Q. DIRECTIONAL QUESTIONS — triggers: "go up/down?", "bullish/bearish?", "should I buy/sell?", "next week/month/tomorrow", "chances?", "likely?", "will it fall/rise?", "good time to buy?", "going lower/higher?", "what are the odds?" — SKIP the full analysis template entirely. Output ONLY this compact plain-English block:
-                       <b style="color:[#28a745 if total_confluence_score>15, #dc3545 if <-15, #ffc107 otherwise]">[SYMBOL] — [one plain verdict: "Most likely DOWN", "Leaning UP", "Too early to call — mixed signals", etc.]</b>
+                       VERDICT RULE — derive the verdict STRICTLY from total_confluence_score, NEVER from the direction the user asked about:
+                         • total_confluence_score > +15 → verdict is "Most likely going UP" (color #28a745)
+                         • total_confluence_score < -15 → verdict is "Most likely going DOWN" (color #dc3545)
+                         • between -15 and +15 → verdict is "Too early to call — mixed signals" (color #ffc107)
+                       The user may ask "will it go down?" — if the score is bullish you MUST still say "Most likely going UP." Never invert the verdict to match what the user asked.
+                       <b style="color:[derived color above]">[SYMBOL] — [derived verdict above]</b>
                        <b>Why:</b>
-                       • [Strongest reason in plain English — e.g. "All 4 timeframes pointing down (Daily, 1h, 15m, 5m all bearish)"]
-                       • [Second reason — e.g. "Price below VWAP $381 — sellers in control intraday"]
-                       • [Third reason — e.g. "RSI 45 — no momentum, trend weakening"]
+                       • [Strongest reason from the data — verify each claim against the actual numbers e.g. if price > intraday_vwap say "above VWAP" not "below VWAP"]
+                       • [Second reason]
+                       • [Third reason]
+                       ACCURACY CHECK before writing Why bullets: (1) if current_price > intraday_vwap → price is ABOVE VWAP; (2) if total_confluence_score > 0 → bias is bullish; (3) win_probability reflects the BULLISH trade succeeding — if user asked about downside, the down probability = 100 − win_probability.
                        <b>Key levels:</b> Support <b style="color:#28a745">$[micro_support]</b> (below this = more downside) · Resistance <b style="color:#dc3545">$[micro_resistance]</b> (above this = setup flips)
                        [If question mentions a timeframe like "next week", "tomorrow", "this week": "<b>[timeframe] price range:</b> $[relevant_lower]–$[relevant_upper] based on current IV"]
-                       <b>Chances of [the direction user asked about]:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if >=52, #dc3545 if <52]"><b>~[win_probability]%</b> ([win_probability_label])</span>
-                       <b>What changes this:</b> [one plain sentence — e.g. "A close above $383 on strong volume would flip the bias bullish"]
+                       <b>Chances of [the direction user asked about]:</b> [if user asked about UP direction: "<span style='color:[#28a745 if win_probability>=65, #ffc107 if >=52, #dc3545 if <52]'><b>~[win_probability]%</b> ([win_probability_label])</span>" | if user asked about DOWN direction: "<span style='color:[#28a745 if (100-win_probability)>=65, #ffc107 if >=52, #dc3545 if <52]'><b>~[100−win_probability]%</b> ([recompute label: High if >=65, Moderate if >=52, Low if <52])</span>"]
+                       <b>What changes this:</b> [one plain sentence]
                        Do NOT output any HTML trade cards, VWAP line, Trend line, Key Levels section, dashboard header, or full analysis template for these questions.
                     R. WIN PROBABILITY DISPLAY — in every trade card (buy, sell, swing), always show the win probability as the last line before </div>:
                        <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if >=50, #dc3545 if <50]">[win_probability]%</span> — <i>[win_probability_label]</i>
@@ -264,17 +270,21 @@ public class TradingAgentService {
                     [If total_confluence_score > +15 AND earnings_flag is false (or earnings_days_away > 10):]
                     <div class="trade-card buy">
                     <b style="color:#28a745">📈 WHAT TO DO — Strong Buy</b>
-                    <b>Entry:</b> <b>$[final_entry]</b>  |  <b style="color:#28a745">Target:</b> <b style="color:#28a745">$[final_tp]</b>  |  <b style="color:#dc3545">Stop:</b> <b style="color:#dc3545">$[final_sl]</b>  ·  R:R [rr_ratio]
-                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s)
+                    [if automated_trade_verdict is EXECUTE_CALL_OR_LONG_SPREAD: "🎯 <b>Enter now at <b style='color:#28a745'>$[final_entry]</b></b> — momentum confirmed, buy at market" | else: "🎯 <b>Wait for pullback to <b style='color:#28a745'>$[final_entry]</b></b> — price is extended at $[current_price]; <span style='color:#dc3545'>do NOT enter above $[current_price]</span>"]
+                    <b>Target:</b> <b style="color:#28a745">$[final_tp]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[final_sl]</b>  ·  <b>R:R [rr_ratio]</b>  ·  Qty: ~[suggested_shares] shares  /  ~[suggested_contracts] contract(s)
 
-                    <b>⚡ Option A — [strategy_a]</b>[if recommended_strategy equals "A": " <span style='color:#28a745'>← Recommended</span>" else ""] — [if strategy_a equals "Long Call": "max leverage, premium is your max loss. Best when momentum is strong + IV is low" else "single leg"]
-                    [options_line_a]
+                    <i>Pick ONE — these are alternatives, not a stack:</i>
+                    <b>⚡ A — [strategy_a]</b>[if recommended_strategy equals "A": " <span style='color:#28a745'>← Recommended</span>"]
+                    [options_line_a][if strategy_a equals "Long Call": "  <i>(max loss = premium paid, unlimited upside)</i>"]
+                    <i>[timing_label]</i>
 
-                    <b>📊 Option B — [strategy_b]</b>[if recommended_strategy equals "B": " <span style='color:#28a745'>← Recommended</span>" else ""] — defined risk, capped profit. Best for moderate conviction
-                    [options_line_b]
+                    <b>📊 B — [strategy_b]</b>[if recommended_strategy equals "B": " <span style='color:#28a745'>← Recommended</span>"]
+                    [options_line_b]  <i>(defined risk, capped profit)</i>
+                    <i>[timing_label]</i>
 
-                    <b>💰 Option C — [strategy_c]</b>[if recommended_strategy equals "C": " <span style='color:#28a745'>← Recommended</span>" else ""] — collect premium upfront, profit if price stays above support. Best when IV is high
+                    <b>💰 C — [strategy_c]</b>[if recommended_strategy equals "C": " <span style='color:#28a745'>← Recommended</span>"]
                     [options_line_c]
+                    ✅ <i>Can enter NOW at market — you're selling puts far below current price; entry timing is less critical for credit spreads</i>
 
                     <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>[if win_probability < 52: " — consider smaller size" | if win_probability >= 72: " — high-conviction setup"]
                     </div>
@@ -286,17 +296,21 @@ public class TradingAgentService {
                     [If total_confluence_score < −15:]
                     <div class="trade-card sell">
                     <b style="color:#dc3545">📉 WHAT TO DO — Strong Sell</b>
-                    <b>Entry:</b> <b>$[final_entry]</b>  |  <b style="color:#28a745">Target:</b> <b style="color:#28a745">$[final_tp]</b>  |  <b style="color:#dc3545">Stop:</b> <b style="color:#dc3545">$[final_sl]</b>  ·  R:R [rr_ratio]
-                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s)
+                    [if automated_trade_verdict is EXECUTE_PUT_OR_SHORT_SPREAD: "🎯 <b>Enter now at <b style='color:#dc3545'>$[final_entry]</b></b> — bearish momentum confirmed, sell at market" | else: "🎯 <b>Wait for bounce to <b style='color:#dc3545'>$[final_entry]</b></b> — price is oversold at $[current_price]; <span style='color:#dc3545'>do NOT enter below $[current_price]</span>"]
+                    <b>Target:</b> <b style="color:#28a745">$[final_tp]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[final_sl]</b>  ·  <b>R:R [rr_ratio]</b>  ·  Qty: ~[suggested_shares] shares  /  ~[suggested_contracts] contract(s)
 
-                    <b>⚡ Option A — [strategy_a]</b>[if recommended_strategy equals "A": " <span style='color:#dc3545'>← Recommended</span>" else ""] — max leverage, premium is your max loss. Best when momentum is strong + IV is low
-                    [options_line_a]
+                    <i>Pick ONE — these are alternatives, not a stack:</i>
+                    <b>⚡ A — [strategy_a]</b>[if recommended_strategy equals "A": " <span style='color:#dc3545'>← Recommended</span>"]
+                    [options_line_a]  <i>(max loss = premium paid)</i>
+                    <i>[timing_label]</i>
 
-                    <b>📊 Option B — [strategy_b]</b>[if recommended_strategy equals "B": " <span style='color:#dc3545'>← Recommended</span>" else ""] — defined risk, capped profit. Best for moderate conviction
-                    [options_line_b]
+                    <b>📊 B — [strategy_b]</b>[if recommended_strategy equals "B": " <span style='color:#dc3545'>← Recommended</span>"]
+                    [options_line_b]  <i>(defined risk, capped profit)</i>
+                    <i>[timing_label]</i>
 
-                    <b>💰 Option C — [strategy_c]</b>[if recommended_strategy equals "C": " <span style='color:#dc3545'>← Recommended</span>" else ""] — collect premium upfront, profit if price stays below resistance. Best when IV is high
+                    <b>💰 C — [strategy_c]</b>[if recommended_strategy equals "C": " <span style='color:#dc3545'>← Recommended</span>"]
                     [options_line_c]
+                    ✅ <i>Can enter NOW at market — you're selling calls far above current price; entry timing is less critical for credit spreads</i>
 
                     <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>[if win_probability < 52: " — consider smaller size" | if win_probability >= 72: " — high-conviction setup"]
                     </div>
@@ -309,8 +323,8 @@ public class TradingAgentService {
                     <div class="trade-card swing-long">
                     <b style="color:#28a745">🔄 SWING TRADE — Near Support, Long Opportunity</b>
                     [swing_note]
-                    <b>Strategy:</b> <i>[swing_strategy]</i>  |  Holding: days to weeks
-                    <b>Entry:</b> <b>$[swing_entry]</b>  |  <b style="color:#28a745">Target:</b> <b style="color:#28a745">$[swing_target]</b>  |  <b style="color:#dc3545">Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>
+                    🎯 <b>Enter near <b style="color:#28a745">$[swing_entry]</b></b> — at or below current price; wait for price to pull back to this zone before entering
+                    <b>Target:</b> <b style="color:#28a745">$[swing_target]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>  ·  <b>Strategy:</b> <i>[swing_strategy]</i>  ·  Holding: days to weeks
                     Support tested <b>[swing_support_strength]×</b> — stronger the more times it held
                     <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
                     </div>
@@ -318,8 +332,8 @@ public class TradingAgentService {
                     <div class="trade-card swing-short">
                     <b style="color:#dc3545">🔄 SWING TRADE — Near Resistance, Short Opportunity</b>
                     [swing_note]
-                    <b>Strategy:</b> <i>[swing_strategy]</i>  |  Holding: days to weeks
-                    <b>Entry:</b> <b>$[swing_entry]</b>  |  <b style="color:#28a745">Target:</b> <b style="color:#28a745">$[swing_target]</b>  |  <b style="color:#dc3545">Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>
+                    🎯 <b>Enter near <b style="color:#dc3545">$[swing_entry]</b></b> — at or above current price; wait for price to rally into this zone before entering
+                    <b>Target:</b> <b style="color:#28a745">$[swing_target]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>  ·  <b>Strategy:</b> <i>[swing_strategy]</i>  ·  Holding: days to weeks
                     Resistance tested <b>[swing_resistance_strength]×</b> — stronger the more times it rejected
                     <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
                     </div>
@@ -447,7 +461,11 @@ public class TradingAgentService {
                     - Price: <td>$[current_price]</td>
                     - Chg%: <td><span style="color:[#28a745 if percent_change starts with +, else #dc3545]">[percent_change]</span></td>
                     - ADX: <td>[adx_value | 0dp] <i>([<20: "Ranging", 20-25: "Weak", >25: "Trending"])</i></td>
-                    - Setup: <td><b>[swing_trade_signal mapped: SWING_LONG→<span style="color:#17a2b8">Near Support ↑</span>, SWING_SHORT→<span style="color:#6f42c1">Near Resistance ↓</span>, RANGE_PLAY→<span style="color:#fd7e14">Range Play ↔</span>]</b></td>
+                    - Setup: <td><b>[swing_trade_signal mapped: SWING_LONG→<span style="color:#17a2b8">Near Support ↑</span>, SWING_SHORT→<span style="color:#6f42c1">Near Resistance ↓</span>, RANGE_PLAY→<span style="color:#fd7e14">Range Play ↔</span>]</b>
+                      [if breakout_type=="FRESH_CROSS": <br><span style="font-size:0.8em;color:#fd7e14">🔥 EMA Cross</span>]
+                      [if breakout_type=="ABOVE_EMA50": <br><span style="font-size:0.8em;color:#17a2b8">⬆ EMA50 Break</span>]
+                      [if breakout_type=="RANGE_BREAK": <br><span style="font-size:0.8em;color:#6f42c1">📊 Range Break</span>]
+                      [if volume_ratio>=1.5: <span style="font-size:0.8em;color:#17a2b8"> · Vol [volume_ratio]x</span>]</td>
                     - Support: <td><b style="color:#28a745">$[swing_support]</b></td>
                     - Resistance: <td><b style="color:#dc3545">$[swing_resistance]</b></td>
                     - Stock Play: [if SWING_LONG: <td><b style="color:#28a745">📈 Buy @ $[swing_entry]</b><br><span style="font-size:0.85em;color:#6c757d">TP <b style="color:#28a745">$[swing_target]</b> · Stop <b style="color:#dc3545">$[swing_stop]</b></span></td>]
@@ -456,7 +474,14 @@ public class TradingAgentService {
                     - Options Play: <td><i>[swing_strategy]</i><br><span style="font-size:0.85em;color:#6c757d">[options_line_b]</span></td>]
                     </table>
                     [swing_note for each row if available — one short sentence per stock on why the setup is valid]
-                    [1-2 plain English sentences on the strongest setup and overall market context. No jargon.]
+
+                    REQUIRED — always render this block after the table, never skip it:
+                    <div class="best-play-card">
+                    <b>🔄 Best Swing Symbols to Play</b>
+                    Pick the top 2 SWING_LONG setups ranked by confluence + breakout bonus + volume surge. One line each:
+                    <b style="color:#17a2b8">[SYMBOL]</b> — [why: at $[swing_support] support, [breakout_type readable], [volume_ratio]x volume] · Entry: <b>$[swing_entry]</b> → TP <b style="color:#28a745">$[swing_target]</b> · Stop <b style="color:#dc3545">$[swing_stop]</b> · Options: <i>[swing_strategy]</i>
+                    If no SWING_LONG, pick the best RANGE_PLAY with the tightest range width.
+                    </div>
                     ---
                     """;
 
@@ -511,7 +536,13 @@ public class TradingAgentService {
                                   [if total_confluence_score<=0: <td><b style="color:#dc3545">📉 Short @ $[micro_resistance]</b><br><span style="font-size:0.85em;color:#6c757d">TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b></span></td>]
                     - Options Play: <td><i>[strategy_name]</i><br><span style="font-size:0.85em;color:#6c757d">[options_line_b]</span></td>]
                     </table>
-                    [1-2 plain English sentences on which squeeze looks most ready to break out and in which direction. No jargon.]
+
+                    REQUIRED — always render this block after the table, never skip it:
+                    <div class="best-play-card">
+                    <b>🔥 Best Squeeze to Play</b>
+                    Pick the 1–2 tightest squeezes (lowest ADX) with a clear directional bias (|total_confluence_score| > 20). One line each:
+                    <b style="color:#ffc107">[SYMBOL]</b> — ADX [adx_value], IV rank [iv_rank]% (cheap options) · Bias: [bullish/bearish] · Entry: <b>$[micro_support or micro_resistance]</b> → TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b> · Play: <i>[strategy_name]</i> — ideal for low-cost straddle if direction unclear
+                    </div>
                     ---
                     """;
 
@@ -534,7 +565,14 @@ public class TradingAgentService {
                                   [if total_confluence_score<=0: <td><b style="color:#dc3545">📉 Short @ $[micro_resistance]</b><br><span style="font-size:0.85em;color:#6c757d">TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b></span></td>]
                     - Options Play: <td><i>[strategy_name]</i><br><span style="font-size:0.85em;color:#6c757d">[options_line_b]</span></td>]
                     </table>
-                    [2-3 plain English sentences: which play looks best, whether to buy options (low IV rank) or sell premium (high IV rank > 70), and key risk (binary event).]
+
+                    REQUIRED — always render this block after the table, never skip it:
+                    <div class="best-play-card">
+                    <b>📅 Best Earnings Play Right Now</b>
+                    Pick the top 1–2 by: earnings soonest + highest confluence + strongest unusual options flow. One line each:
+                    <b style="color:#ffc107">[SYMBOL]</b> — earnings in [earnings_days_away]d · IV rank [iv_rank]% ([if >70: sell premium — IV is expensive | if <40: buy options — IV is cheap]) · [unusual flow if any] · Stock: <b>[direction] @ $[entry]</b> → TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b> · Options: <i>[strategy_name]</i>
+                    One sentence on key risk: "Binary event — exit before earnings if not playing the report."
+                    </div>
                     ---
                     """;
 
@@ -557,7 +595,12 @@ public class TradingAgentService {
                     - Stock Play: <td><b style="color:#28a745">📈 Buy @ $[swing_entry]</b><br><span style="font-size:0.85em;color:#6c757d">TP <b style="color:#28a745">$[swing_target]</b> · Stop <b style="color:#dc3545">$[swing_stop]</b></span></td>
                     - Options Play: <td><i>[swing_strategy]</i><br><span style="font-size:0.85em;color:#6c757d">[options_line_b]</span></td>]
                     </table>
-                    [2-3 plain English sentences: explain the failed breakdown concept in simple terms, name the strongest setup, and highlight the risk level.]
+                    REQUIRED — always render this block after the table, never skip it:
+                    <div class="best-play-card">
+                    <b>↩️ Best Failed Breakdown to Play</b>
+                    Pick the top 1–2 by highest confluence + volume surge (prefer volume_ratio>=1.5). One line each:
+                    <b style="color:#17a2b8">[SYMBOL]</b> — held $[swing_support] support with [volume_ratio]x volume · Entry: <b>$[swing_entry]</b> → TP <b style="color:#28a745">$[swing_target]</b> · Stop <b style="color:#dc3545">$[swing_stop]</b> · Options: <i>[swing_strategy]</i> @ $[strike_buy]
+                    </div>
                     ---
                     """;
 
@@ -569,24 +612,30 @@ public class TradingAgentService {
                     <b>[TODAY'S TOP TRADES — [ticker_count] Stocks Worth Watching]</b>
                     Scanned at: [processing time from System Note]
                     <table>
-                    <tr><th>Stock</th><th>Price</th><th>Change</th><th>Direction</th><th>Signal</th><th>📈 Stock Play</th><th>📊 Options Play</th><th>Win%</th></tr>
+                    <tr><th>Stock</th><th>Price</th><th>Change</th><th>Direction</th><th>Signal / Setup</th><th>📈 Stock Play</th><th>📊 Options Play</th><th>Win%</th></tr>
                     [One <tr> per scan_results object:
                     - Stock: <td><span class="ticker-link" onclick="submitChip('analyze [symbol]')" style="color:[#28a745 if total_confluence_score>0 else #dc3545];cursor:pointer;text-decoration:underline dotted;font-weight:700">[symbol]</span></td>
                     - Price: <td>$[current_price]</td>
                     - Change: <td><span style="color:[#28a745/+ else #dc3545]">[percent_change]</span></td>
                     - Direction: <td><span style="color:[#28a745 if >15, #dc3545 if <-15, #ffc107 else]"><b>[Buy if >15 / Sell if <-15 / Hold]</b></span></td>
-                    - Signal: <td><span style="color:[#28a745 if total_confluence_score>0 else #dc3545]"><b>[Rule B short form e.g. "Strong Buy (+72)"]</b></span></td>
+                    - Signal / Setup: <td><span style="color:[#28a745 if total_confluence_score>0 else #dc3545]"><b>[Rule B short form e.g. "Strong Buy (+72)"]</b></span>
+                      [if breakout_type=="FRESH_CROSS": <br><span style="font-size:0.8em;color:#fd7e14">🔥 EMA Cross</span>]
+                      [if breakout_type=="ABOVE_EMA50": <br><span style="font-size:0.8em;color:#17a2b8">⬆ EMA50 Break</span>]
+                      [if breakout_type=="RANGE_BREAK": <br><span style="font-size:0.8em;color:#6f42c1">📊 Range Break</span>]
+                      [if volume_ratio>=2.0: <span style="font-size:0.8em;color:#17a2b8"> · Vol <b>[volume_ratio]x</b></span>]
+                      [if volume_ratio>=1.5 and <2.0: <span style="font-size:0.8em;color:#6c757d"> · Vol [volume_ratio]x</span>]</td>
                     - Stock Play: [if bullish: <td><b style="color:#28a745">📈 Buy @ $[micro_support]</b><br><span style="font-size:0.85em;color:#6c757d">TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b></span></td>]
                                   [if bearish: <td><b style="color:#dc3545">📉 Short @ $[micro_resistance]</b><br><span style="font-size:0.85em;color:#6c757d">TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b></span></td>]
                     - Options Play: <td><i>[strategy_name]</i><br><span style="font-size:0.85em;color:#6c757d">[options_line_b]</span></td>
                     - Win%: <td><span style="color:[#28a745 if win_probability>=65, #ffc107 if >=52, #dc3545 if <52]"><b>[win_probability]%</b></span></td>]
                     </table>
 
+                    REQUIRED — always render this block after the table, never skip it:
                     <div class="best-play-card">
-                    <b>🎯 Best Play Right Now</b>
-                    [Pick the 1–2 highest-conviction setups from the scan. For each, write ONE sentence: ticker, direction, strongest reason, and BOTH plays. Format:
-                    <b style="color:[#28a745 if bullish, #dc3545 if bearish]">[SYMBOL]</b> — [one-sentence reason] · Stock: <b>[📈 Buy $micro_support OR 📉 Short $micro_resistance]</b> → TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b> · Options: <i>[strategy_name]</i> @ $[strike_buy] · Win Rate <b>[win_probability]%</b>
-                    If nothing stands out clearly, write: "No high-conviction setup right now — wait for clearer signals."]
+                    <b>🎯 Best Symbols to Play Right Now</b>
+                    Rank the results by: highest absolute confluence score first, then +20 bonus for FRESH_CROSS breakout, +15 for ABOVE_EMA50, +10 for RANGE_BREAK, +10 for volume_ratio>=2.0. Pick the top 2–3 and write one line each:
+                    <b style="color:#28a745">[SYMBOL]</b> — [breakout type in plain English, e.g. "fresh EMA cross"] · [volume_ratio]x volume surge · Stock: <b>📈 Buy @ $[micro_support]</b> → TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b> · Options: <i>[strategy_name]</i> @ $[strike_buy] · Win Rate <b>[win_probability]%</b>
+                    Always mention the sector if it's cybersecurity, semiconductor, or biotech.
                     </div>
                     ---
                     """;
@@ -611,7 +660,14 @@ public class TradingAgentService {
                                   [if bearish: <td><b style="color:#dc3545">📉 Short @ $[micro_resistance]</b><br><span style="font-size:0.85em;color:#6c757d">TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b></span></td>]
                     - Options Play: <td><i>[strategy_name]</i><br><span style="font-size:0.85em;color:#6c757d">[options_line_b]</span></td>]
                     </table>
-                    [2-3 plain English sentences: overall pre-market mood, strongest setup, best stock for the open. No jargon.]
+
+                    REQUIRED — always render this block after the table, never skip it:
+                    <div class="best-play-card">
+                    <b>🌅 Best Pre-Market Play Right Now</b>
+                    Pick the 1–2 stocks with the biggest confirmed move AND positive confluence. One line each:
+                    <b style="color:#28a745">[SYMBOL]</b> — [move size, e.g. "gapping up +8%"] · [pattern, e.g. "Gap & Go"] · Stock: <b>📈 Buy @ $[micro_support]</b> → TP <b style="color:#28a745">$[final_tp]</b> · Stop <b style="color:#dc3545">$[final_sl]</b> · Options: <i>[strategy_name]</i> @ $[strike_buy]
+                    One sentence on overall pre-market mood (risk-on / risk-off / mixed).
+                    </div>
                     ---
                     """;
 

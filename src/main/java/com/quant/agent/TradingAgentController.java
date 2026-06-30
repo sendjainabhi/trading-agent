@@ -97,34 +97,24 @@ public class TradingAgentController {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/"
                             + sym + "?interval=1m&range=1d&includePrePost=true"))
-                    .header("User-Agent", "Mozilla/5.0")
-                    .timeout(Duration.ofSeconds(8))
-                    .GET()
-                    .build();
+                    .header("User-Agent", "Mozilla/5.0").timeout(Duration.ofSeconds(8)).GET().build();
             HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
             if (res.statusCode() == 200) {
-                JsonNode root       = objectMapper.readTree(res.body());
+                JsonNode root = objectMapper.readTree(res.body());
                 JsonNode resultNode = root.path("chart").path("result").path(0);
-                JsonNode meta       = resultNode.path("meta");
-
+                JsonNode meta = resultNode.path("meta");
                 double yahooPrice = meta.path("regularMarketPrice").asDouble();
                 double prevClose  = meta.path("chartPreviousClose").asDouble();
                 if (prevClose <= 0) prevClose = meta.path("previousClose").asDouble();
-
-                // Prefer the most recent 1-min bar close over the meta snapshot
-                // (captures pre/post-market moves that regularMarketPrice misses)
                 JsonNode closes = resultNode.path("indicators").path("quote").path(0).path("close");
                 if (closes.isArray()) {
                     for (int i = closes.size() - 1; i >= 0; i--) {
                         if (!closes.get(i).isNull()) { yahooPrice = closes.get(i).asDouble(); break; }
                     }
                 }
-
-                // Use Alpaca WS price if it has a fresh quote — otherwise keep Yahoo's
                 Optional<AlpacaStreamService.LiveQuote> wsQuote = alpacaStreamService.getLatestQuote(sym);
                 double price  = wsQuote.map(AlpacaStreamService.LiveQuote::price).filter(p -> p > 0).orElse(yahooPrice);
                 String source = wsQuote.isPresent() ? "live" : "yahoo";
-
                 double change    = prevClose > 0 ? price - prevClose : 0.0;
                 double changePct = prevClose > 0 ? (change / prevClose) * 100.0 : 0.0;
                 String updatedAt = TIME_FMT.format(LocalTime.now(ET));
