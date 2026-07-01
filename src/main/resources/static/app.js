@@ -1282,28 +1282,33 @@ function toggleTheme() {
     }).catch(() => {});
 }
 
-// ── Boot: load all prefs from server, fall back to localStorage ───────────
+// ── Boot: load all prefs from server (file is authoritative — not localStorage) ───────────
 async function initPrefs() {
     let prefs = null;
     try {
         const res = await fetch('/api/prefs');
         if (res.ok) prefs = await res.json();
-    } catch (e) { /* server not ready — use localStorage */ }
+    } catch (e) { /* server not ready */ }
 
     // Theme
     const theme = (prefs && prefs.theme) || localStorage.getItem(THEME_KEY) || 'light';
     applyTheme(theme);
     try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
 
-    // Watchlist
-    if (prefs && prefs.watchlist) {
-        wlFavorites = prefs.watchlist.slice(0, WL_MAX);
+    // Watchlist — server file is authoritative; localStorage is not used as a fallback
+    if (prefs) {
+        wlFavorites = (prefs.watchlist || []).slice(0, WL_MAX);
         wlNames     = prefs.watchlistNames || {};
-        try { localStorage.setItem(WL_KEY,       JSON.stringify(wlFavorites)); } catch (e) {}
-        try { localStorage.setItem(WL_NAMES_KEY, JSON.stringify(wlNames));     } catch (e) {}
-    } else {
-        loadWlNames();
-        loadWatchlist();
+    }
+    // If server was unreachable, wlFavorites stays [] — the file is the source of truth
+
+    // Model settings — sync non-secret fields from server so they survive browser cache clears
+    if (prefs && prefs.modelConfig && prefs.modelConfig.model) {
+        modelSettings.provider    = prefs.modelConfig.provider    || modelSettings.provider;
+        modelSettings.model       = prefs.modelConfig.model       || modelSettings.model;
+        modelSettings.baseUrl     = prefs.modelConfig.baseUrl     || modelSettings.baseUrl;
+        modelSettings.temperature = parseFloat(prefs.modelConfig.temperature || modelSettings.temperature);
+        // apiKey is never returned by the server — keep from localStorage if present
     }
 
     renderWatchlist();

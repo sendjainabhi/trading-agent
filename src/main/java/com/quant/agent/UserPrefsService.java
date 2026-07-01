@@ -20,9 +20,17 @@ public class UserPrefsService {
 
     private static final Logger log = LoggerFactory.getLogger(UserPrefsService.class);
 
-    private final Path prefsFile = Paths.get(System.getProperty("user.home"), ".alphaquant", "prefs.json");
+    private final Path prefsFile;
     private final ObjectMapper mapper = new ObjectMapper();
     private Prefs prefs = new Prefs();
+
+    public UserPrefsService() {
+        // Store prefs in the project parent directory (one level above trading-agent/)
+        Path projectDir = Paths.get(System.getProperty("user.dir", "."));
+        Path parent = projectDir.getParent();
+        this.prefsFile = (parent != null ? parent : projectDir).resolve("local-persistance/trading-prefs.json");
+        log.info("Prefs file location: {}", prefsFile);
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Prefs {
@@ -36,6 +44,15 @@ public class UserPrefsService {
     @PostConstruct
     public void load() {
         try {
+            if (!Files.exists(prefsFile)) {
+                // Migrate from old ~/.alphaquant/prefs.json if it exists
+                Path oldFile = Paths.get(System.getProperty("user.home"), ".alphaquant", "prefs.json");
+                if (Files.exists(oldFile)) {
+                    Files.createDirectories(prefsFile.getParent());
+                    Files.copy(oldFile, prefsFile);
+                    log.info("Migrated prefs from {} to {}", oldFile, prefsFile);
+                }
+            }
             if (Files.exists(prefsFile)) {
                 prefs = mapper.readValue(prefsFile.toFile(), Prefs.class);
                 log.info("Loaded user prefs from {}", prefsFile);
@@ -55,7 +72,19 @@ public class UserPrefsService {
         }
     }
 
-    public Prefs getAll() { return prefs; }
+    /** Always re-reads from file so GET /api/prefs never returns stale in-memory state. */
+    public Prefs getAll() {
+        try {
+            if (Files.exists(prefsFile)) {
+                Prefs fresh = mapper.readValue(prefsFile.toFile(), Prefs.class);
+                prefs = fresh; // keep in-memory in sync
+                return fresh;
+            }
+        } catch (Exception e) {
+            log.warn("Could not reload prefs from {}: {}", prefsFile, e.getMessage());
+        }
+        return prefs;
+    }
 
     public void setWatchlist(List<String> list, Map<String, String> names) {
         prefs.watchlist = list != null ? list : new ArrayList<>();
@@ -74,11 +103,11 @@ public class UserPrefsService {
     }
 
     public Map<String, String> getModelConfig() {
-        return prefs.modelConfig;
+        return getAll().modelConfig;
     }
 
     public List<Map<String, String>> getJournal() {
-        return new ArrayList<>(prefs.journal);
+        return new ArrayList<>(getAll().journal);
     }
 
     public synchronized void addJournalEntry(Map<String, String> entry) {

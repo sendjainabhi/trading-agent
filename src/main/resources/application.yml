@@ -37,12 +37,26 @@ alpaca:
   api:
     key: "PKR4CIRX4QSVMPQ7BEITOV6MFB"
     secret: "8m9APJBfKtJpAoaxqFsCLBx3WRyBHVJdSzuWVBtXWrZm"
+  data:
+    base-url: "https://data.alpaca.markets"
+  broker:
+    base-url: "https://api.alpaca.markets"
 
+yahoo:
+  finance:
+    base-url: "https://query1.finance.yahoo.com"
+
+tradingview:
+  scanner:
+    futures-url: "https://scanner.tradingview.com/futures/scan"
+    stocks-url:  "https://scanner.tradingview.com/america/scan"
+    origin:      "https://www.tradingview.com"
 
 market:
   provider:
-    api-url: "https://finnhub.io/api/v1/quote?symbol="
-    news-url: "https://finnhub.io/api/v1/company-news?symbol="
-    api-key: "d8i9ia9r01qm63baq8o0d8i9ia9r01qm63baq8og"
+    base-url:  "https://finnhub.io/api/v1"
+    api-url:   "https://finnhub.io/api/v1/quote?symbol="
+    news-url:  "https://finnhub.io/api/v1/company-news?symbol="
+    api-key:   "d8i9ia9r01qm63baq8o0d8i9ia9r01qm63baq8og"
     connect-timeout-seconds: 5
     read-timeout-seconds: 5

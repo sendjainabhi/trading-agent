@@ -31,6 +31,9 @@ public class AlpacaClient {
     @Value("${alpaca.api.secret}")
     String apiSecret;
 
+    @Value("${alpaca.data.base-url:https://data.alpaca.markets}")
+    String alpacaDataBaseUrl;
+
     // ── Injected services ─────────────────────────────────────────────────────
 
     final AlpacaStreamService alpacaStreamService;
@@ -44,10 +47,11 @@ public class AlpacaClient {
     /** Builds a GET request against the Alpaca data gateway at {@code fullPath}. */
     public HttpRequest buildAlpacaBaseRequest(String fullPath) {
         return HttpRequest.newBuilder()
-                .uri(URI.create("https://data.alpaca.markets" + fullPath))
+                .uri(URI.create(alpacaDataBaseUrl + fullPath))
                 .header("APCA-API-KEY-ID", apiKey != null ? apiKey : "")
                 .header("APCA-API-SECRET-KEY", apiSecret != null ? apiSecret : "")
                 .header("accept", "application/json")
+                .timeout(Duration.ofSeconds(8))
                 .GET()
                 .build();
     }

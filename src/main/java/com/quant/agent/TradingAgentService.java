@@ -102,6 +102,9 @@ public class TradingAgentService {
     @Autowired
     private ToolCallingManager toolCallingManager;
 
+    @Autowired
+    private TechnicalAnalysisService scannerService;
+
     private final ChatClient.Builder ollamaClientBuilder;
     private final Map<String, ChatClient> providerClients = new ConcurrentHashMap<>();
     private volatile ChatClient activeChatClient;
@@ -114,7 +117,7 @@ public class TradingAgentService {
     // Persisted to the workspace parent directory (one level above trading-agent/)
     private static final String SAVED_CONFIG_PATH =
             java.nio.file.Paths.get(System.getProperty("user.dir", "."))
-                    .getParent().resolve("agent-config.json").toString();
+                    .getParent().resolve("local-persistance/agent-config.json").toString();
 
     @Value("${spring.ai.ollama.base-url:http://127.0.0.1:11434}")
     private String ollamaBaseUrl;
@@ -232,135 +235,104 @@ public class TradingAgentService {
                        - "Trend Quality: ..." — those fields are ONLY for composing the Outlook sentence. Never output them as a separate line.
                        - "Watch: ..." — this line is removed from the template. Never generate it.
                        Raw metric dumps (weekly_bias, ma_stack_score, market_breadth, composite_trend_score as separate labeled lines) are strictly forbidden.
+                    T. HEADER EMOJI: Rule D buy_strength emoji MUST match exactly — STRONG_BUY→🔥, BUY→✅, WATCH→⏳, SELL→⚠️, STRONG_SELL→🔴. NEVER substitute ↑/↓/📈/📉 for buy_strength; those are only for price change direction.
+                    U. S/R CHAIN RULE: In the Daily S/R section R1 < R2 < R3 (strictly ascending, all above current_price) and S1 > S2 > S3 (strictly descending, all below current_price). If any candidate value is on the wrong side of current_price, or would invert the chain, skip it and use the next available candidate from the same source set. Never write a level that breaks the chain.
+                    V. MACD DIVERGENCE: macd_divergence field — "BEARISH_DIV" means price rising but MACD histogram declining (hidden distribution, warn of potential reversal). "BULLISH_DIV" means price falling but MACD histogram rising (hidden accumulation, potential bounce). "NONE" = no divergence. Mention when not NONE.
+                    W. PATTERNS: daily_candle_pattern values — HAMMER (bullish reversal), BULLISH_ENGULFING (strong bullish), BEARISH_ENGULFING (strong bearish), SHOOTING_STAR (bearish reversal), DOJI (indecision), BULLISH_MARUBOZU (strong bull with no wicks), BEARISH_MARUBOZU (strong bear with no wicks). chart_pattern values — NR7 (7-bar narrowest range, breakout imminent), INSIDE_BAR (consolidation), BULL_FLAG (bullish continuation), BEAR_FLAG (bearish continuation). Always mention these when not NONE. Translate to plain English.
+                    X. RVOL (Relative Volume): rvol field — compares today's volume to 10-day average, time-adjusted. rvol >= 3.0 → "Extremely heavy volume 🔥🔥"; rvol >= 2.0 → "Heavy volume 🔥 (institutional activity likely)"; rvol >= 1.2 → "Above-average volume"; rvol < 0.8 → "Light volume — move may lack conviction". Always mention in analysis.
+                    Y. BOLLINGER SQUEEZE: bbw_squeeze true = Bollinger Bands are exceptionally tight (BBW < 5%) — volatility compressed, sharp directional break coming soon. Mention as "🗜️ Volatility Squeeze — breakout imminent". bbw_percent shows exact band width as % of middle band. vwap_zscore shows how many standard deviations price is from VWAP — above +2σ = extended, below -2σ = oversold intraday.
+                    Z. PUT/CALL RATIO (single stock): put_call_ratio field — ratio of put to call volume on nearest expiry. >1.2 = bearish sentiment (heavy put buying 🔴); 0.8–1.2 = neutral; <0.7 = bullish sentiment (call buying dominant 🟢). Mention when available (> 0).
+                    AA. SECTOR RELATIVE STRENGTH: sector_etf field shows which sector ETF covers this stock (e.g. "XLK" for tech). sector_rs is the sector ETF's 20-day return minus SPY's 20-day return — how much the sector beat or lagged the market. sector_trend values: STRONG_INFLOW (sector beating SPY by >3%) → 🟢 strong tailwind; INFLOW (>1%) → mild tailwind; STRONG_OUTFLOW (lagging by >3%) → 🔴 strong headwind; OUTFLOW (>1%) → mild headwind; NEUTRAL → no sector edge. When sector_trend is STRONG_OUTFLOW or OUTFLOW, always warn that the sector headwind may limit upside even on a bullish technical setup. When STRONG_INFLOW, note that sector momentum is confirming the trade. Mention sector_etf by name (e.g. "XLK outperforming SPY"). Only mention if sector_etf is not empty.
                     """;
 
-    // ── Single-stock template — injected only for ticker queries (~5 KB) ─────
+    // ── Single-stock template — injected only for ticker queries ─────────────
     private static final String STOCK_TEMPLATE = """
                     ── SINGLE-STOCK ANALYSIS TEMPLATE ───────────────────────────────────────────
                     (Use ONLY for a specific ticker. Never for scans.)
 
-                    COLOR RULES — substitute the EXACT hex code at every <span>:
-                    - Price header:  #28a745 if percent_change starts with "+", else #dc3545
-                    - Trend/Verdict/Trade: #28a745 if total_confluence_score > 15 | #dc3545 if < -15 | #ffc107 if between
-                    - Per-timeframe (Daily/1h/15m/5m): #28a745 bullish | #dc3545 bearish | #ffc107 flat
-                    - Change %: #28a745 if starts with "+" else #dc3545
-                    BOLD RULE: <b> on (1) ticker, (2) section headers, (3) verdict text, (4) trade price labels only.
+                    COLOR RULES:
+                    - Price header: #28a745 if percent_change starts with "+", else #dc3545
+                    - Trade/Signal: #28a745 if total_confluence_score > 15 | #dc3545 if < −15 | #ffc107 if between
+                    - Per-timeframe arrows: #28a745 bullish | #dc3545 bearish | #ffc107 flat
+                    BOLD RULE: <b> on ticker, section headers, verdict text, price labels only. Never use asterisks.
 
-                    OUTPUT FORMAT — render exactly in this order, no extra sections, no repeated data:
+                    OUTPUT FORMAT — render exactly in this order. Do NOT output any section labels or separator lines. No blank lines between sections — only inside trade cards as shown below.
 
-                    <b style="color:[price color]">[SYMBOL] ($[current_price])</b>  |  [Rule D emoji+text] ([sell_score]/6 ↓ · [buy_score]/6 ↑)  |  [regime_note]  |  [session_status]  |  <span style="color:[change color]">[percent_change]</span>[if earnings_flag is true: "  |  ⚠️ Earnings in [earnings_days_away]d ([earnings_date])"]
-                    <b>Trend:</b> Daily <span style="color:[daily color]">[↑/↓/→]</span> · 1h <span style="color:[1h color]">[↑/↓/→]</span> · 15m <span style="color:[15m color]">[↑/↓/→]</span> · 5m <span style="color:[5m color]">[↑/↓/→]</span>  |  TF: [tf_agreement]/4 aligned[if tf_agreement >= 3: " 🟢" | if tf_agreement <= -3: " 🔴" | else: ""]  |  RSI [calculated_rsi_14d] ([RSI label Rule A])[if rsi_divergence is BEARISH_DIV: "  ⚠️ <span style='color:#dc3545'>Bearish Divergence</span>"][if rsi_divergence is BULLISH_DIV: "  ✅ <span style='color:#28a745'>Bullish Divergence</span>"]  |  Why: [active_sell_signals if sell > buy, else active_buy_signals — one compact sentence]
-                    <b>VWAP</b> $[intraday_vwap]  |  <b>Vol</b> [volume]  |  <b>Range</b> $[micro_support]–$[micro_resistance]  |  <b>ADX</b> [adx_value 1dp] ([adx_trend] [adx_direction mapped: RISING→↑ strengthening, FALLING→↓ exhausting, FLAT→→ flat][if adx_trend is Choppy: " ⚠️"])
-                    <b>Key Levels:</b> PDH <b>$[prior_day_high]</b>  ·  PDL <b>$[prior_day_low]</b>[if swing_support > 0: "  |  <b>Swing Support:</b> <b style='color:#28a745'>$[swing_support]</b> ([swing_support_strength]× tested)"][if swing_resistance > 0: "  ·  <b>Swing Resistance:</b> <b style='color:#dc3545'>$[swing_resistance]</b> ([swing_resistance_strength]× tested)"]
-                    <b>Daily S/R</b> (break with volume confirms move to next level)
-                    <span style="color:#dc3545">🔴 <b>R1</b></span> [Nearest level ABOVE current_price from {micro_resistance, vwap_upper_1sd} — pick the closest one > current_price, format "<b style='color:#dc3545'>$[value]</b>" — if none available write "—"]  <b>──▶</b>  <span style="color:#dc3545"><b>R2</b></span> [Nearest level ABOVE current_price from {prior_day_high, ema8, ema21} — pick closest > current_price, format "<b style='color:#dc3545'>$[value]</b>"]  <b>──▶</b>  <span style="color:#dc3545"><b>R3</b></span> [Nearest level ABOVE current_price from {swing_resistance, ema50, ema200} — pick closest > current_price, format "<b style='color:#dc3545'>$[value]</b> <i>(structural)</i>"]
-                    <span style="color:#28a745">🟢 <b>S1</b></span> [Nearest level BELOW current_price from {micro_support, vwap_lower_1sd} — pick the closest one < current_price, format "<b style='color:#28a745'>$[value]</b>" — if none available write "—"]  <b>──▶</b>  <span style="color:#28a745"><b>S2</b></span> [Nearest level BELOW current_price from {prior_day_low, ema8, ema21} — pick closest < current_price, format "<b style='color:#28a745'>$[value]</b>"]  <b>──▶</b>  <span style="color:#28a745"><b>S3</b></span> [Nearest level BELOW current_price from {swing_support, ema50, ema200} — pick closest < current_price, format "<b style='color:#28a745'>$[value]</b> <i>(structural)</i>"]
-                    <b>Price Targets</b> (IV [implied_volatility] · IV Rank [iv_rank]%[if iv_regime is HIGH: " <span style='color:#dc3545'>🔴 Expensive — sell premium</span>" | if iv_regime is LOW: " <span style='color:#28a745'>🟢 Cheap — buy options</span>"][if earnings_iv_inflated is true: " · <span style='color:#ffc107'>⚠️ IV inflated by earnings — avoid debit spreads</span>"]): Tomorrow $[tomorrow_lower]–$[tomorrow_upper]  ·  Next week $[next_week_lower]–$[next_week_upper]  ·  [if custom_days > 0: "[custom_days]-day" else "15-day"] $[custom_lower]–$[custom_upper]
-                    <b>Outlook:</b> <span style="color:[#28a745 if composite_trend_score>55, #dc3545 if composite_trend_score<45, else #ffc107]"><b>[composite_trend_label]</b></span> — [ONE plain sentence: mention weekly chart direction (bullish/bearish/mixed), whether trend stack is strong or weak, and whether broad market participation supports the move. No raw numbers, no jargon.]  ·  Beta <b>[beta | 2dp]</b>[if beta > 2.0: " <i>(high-beta ~[beta | 1dp]×)</i>" | if beta > 1.3: " <i>(above-avg sensitivity)</i>" | else: ""]  ·  <b style="color:[#28a745 if confidence_score>=75, #ffc107 if confidence_score>=50, #dc3545 if confidence_score<50]">Setup confidence: [confidence_score]%</b> <i>([confidence_label])</i>[if unusual_options_activity is not NONE: "  ·  Options Flow: <span style='color:#ffc107'>⚡ [unusual_options_activity replaced: UNUSUAL_CALL_BUYING→Unusual Call Buying, UNUSUAL_PUT_BUYING→Unusual Put Buying, UNUSUAL_BOTH→Unusual Both Sides]</span>"]
-                    <b>Smart Money:</b> [Rule E]  |  News: <span style="color:[#28a745 if Bullish, #dc3545 if Bearish, else #6c757d]">[news_sentiment]</span>  |  Insiders: [if insider_mspr > 20: "<span style='color:#28a745'>Buying</span>" | if insider_mspr < -20: "<span style='color:#dc3545'>Selling</span>" | else: "Neutral"]  |  Analysts: <b style="color:#28a745">[analyst_buy]B</b> · [analyst_hold]H · <b style="color:#dc3545">[analyst_sell]S</b>[if smart_money_conflict: "  ⚠️ Conflicts with chart"]
-
-                    [Output ONLY the matching block — never print the condition label:]
-                    [EARNINGS OVERRIDE: If earnings_flag is true AND earnings_days_away <= 10, skip the buy/sell blocks entirely and output ONLY the hold block below with this warning prepended:]
+                    <b style="color:[price color]">[SYMBOL] ($[current_price])</b> | [Rule D emoji+text] | [session_status] | <span style="color:[change color]">[percent_change]</span>[if earnings_flag: " | ⚠️ Earnings in [earnings_days_away]d ([earnings_date])"]
+                    <b>📈 Trend</b> Daily <span style="color:[daily color]">[↑/↓/→]</span> · 1h <span style="color:[1h color]">[↑/↓/→]</span> · 15m <span style="color:[15m color]">[↑/↓/→]</span> · 5m <span style="color:[5m color]">[↑/↓/→]</span> · Aligned: [tf_agreement]/4[if tf_agreement == 0: " ⚠️ <span style='color:#ffc107'>All timeframes conflicting</span>"]
+                    <b>Signal:</b> <span style="color:[#28a745 if confidence_score>=75, #ffc107 if confidence_score>=50, #dc3545 if confidence_score<50]"><b>[buy_strength: STRONG_BUY→"🔥 Strong Buy", BUY→"🟢 Moderate Buy", WATCH→"⏳ Mixed Signals", SELL→"🟠 Moderate Sell", STRONG_SELL→"🔴 Strong Sell"]</b></span> · [confidence_score]% · RSI [calculated_rsi_14d] ([RSI label per Rule A]) · RVOL [rvol | 1dp]×[if rvol>=2.0: " 🔥"]
+                    <b>Why:</b> [active_buy_signals if buy_score > sell_score else active_sell_signals — 1 plain sentence, no jargon, must match RSI label above]
+                    <b>📊 What's Happening:</b> [Write 2–7 plain English sentences: (1) where price sits relative to VWAP ($[intraday_vwap]) and nearest support/resistance — is it holding, rejecting, or breaking a level; (2) momentum direction — "strong/fading/weak/recovering", not indicator names; (3) if daily_candle_pattern or chart_pattern is not NONE or bbw_squeeze is true — MUST state the pattern in plain English AND what it typically means for the next move; (4) if sector_etf is not empty — state sector context using Rule AA; (5) smart money — always include: translate smart_money_verdict per Rule E (e.g. "🐋 Institutions Buying — big money is accumulating" or "🚨 Institutions Selling — distribution detected" or "😐 Institutions Neutral"); (6) insider activity — if insider_buys > 0 or insider_sells > 0: write "Insiders: [insider_buys] buys / [insider_sells] sells in last 3 months — " then insider_buys > insider_sells → "net buying 🟢", insider_sells > insider_buys → "net selling 🔴", equal → "mixed 🟡". Skip only if both are 0; (7) analyst consensus — only if notable.]
+                    <b>📍 Key Levels</b>
+                    <span style="color:#dc3545"><b>Resistance:</b></span> <b style="color:#dc3545">$[sr_r1]</b> <i>(nearest)</i> · <b style="color:#dc3545">$[sr_r2]</b> · <b style="color:#dc3545">$[sr_r3]</b> <i>(structural)</i>
+                    <span style="color:#28a745"><b>Support:</b></span> <b style="color:#28a745">$[sr_s1]</b> <i>(nearest)</i> · <b style="color:#28a745">$[sr_s2]</b> · <b style="color:#28a745">$[sr_s3]</b> <i>(structural)</i>
+                    <span style="color:#6c757d"><b>PDH/PDL:</b></span> Yesterday High <b style="color:#dc3545">$[prior_day_high]</b> · Yesterday Low <b style="color:#28a745">$[prior_day_low]</b> <i>(key intraday reference)</i>
+                    <span style="color:#6c757d"><b>Range:</b></span> Tomorrow <b>$[tomorrow_lower]–$[tomorrow_upper]</b> · This week <b>$[next_week_lower]–$[next_week_upper]</b>[if custom_days > 0: " · [custom_days]-day <b>$[custom_lower]–$[custom_upper]</b>"][if iv_regime is HIGH: " · <span style='color:#dc3545'>IV expensive</span>" | if iv_regime is LOW: " · <span style='color:#28a745'>IV cheap</span>"]
+                    [Output ONLY the matching trade block below. No blank lines before the first card.]
+                    [EARNINGS OVERRIDE: if earnings_flag is true AND earnings_days_away <= 10, output ONLY this card:]
                     <div class="trade-card hold">
-                    <b style="color:#ffc107">⚠️ EARNINGS IN [earnings_days_away] DAYS ([earnings_date]) — Stand Aside</b>
-                    IV is inflated pre-earnings — debit spreads are overpriced. Best plays: Iron Condor (collect premium both sides) or wait for the earnings reaction.
-                    [then continue with the normal Hold block content below]
+                    <b style="color:#ffc107">⚠️ Earnings in [earnings_days_away] days ([earnings_date]) — Stand Aside</b>
+                    Options premiums are inflated before earnings — buying a spread is overpriced. Best approach: Iron Condor to collect premium from both sides, or simply wait for the earnings reaction and enter after the dust settles.
                     </div>
-                    [end earnings override]
-                    [If total_confluence_score > +15 AND earnings_flag is false (or earnings_days_away > 10):]
+                    [end earnings override — skip buy/sell/hold below if earnings override triggered]
+                    [If total_confluence_score > +15 AND no earnings override:]
                     <div class="trade-card buy">
-                    <b style="color:#28a745">📈 WHAT TO DO — Strong Buy</b>
-                    [if automated_trade_verdict is EXECUTE_CALL_OR_LONG_SPREAD: "🎯 <b>Enter now at <b style='color:#28a745'>$[final_entry]</b></b> — momentum confirmed, buy at market" | else: "🎯 <b>Wait for pullback to <b style='color:#28a745'>$[final_entry]</b></b> — price is extended at $[current_price]; <span style='color:#dc3545'>do NOT enter above $[current_price]</span>"]
-                    <b>Target:</b> <b style="color:#28a745">$[final_tp]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[final_sl]</b>  ·  <b>R:R [rr_ratio]</b>  ·  Qty: ~[suggested_shares] shares  /  ~[suggested_contracts] contract(s)
-
-                    <i>Pick ONE — these are alternatives, not a stack:</i>
-                    <b>⚡ A — [strategy_a]</b>[if recommended_strategy equals "A": " <span style='color:#28a745'>← Recommended</span>"]
-                    [options_line_a][if strategy_a equals "Long Call": "  <i>(max loss = premium paid, unlimited upside)</i>"]
-                    <i>[timing_label]</i>
-
-                    <b>📊 B — [strategy_b]</b>[if recommended_strategy equals "B": " <span style='color:#28a745'>← Recommended</span>"]
-                    [options_line_b]  <i>(defined risk, capped profit)</i>
-                    <i>[timing_label]</i>
-
-                    <b>💰 C — [strategy_c]</b>[if recommended_strategy equals "C": " <span style='color:#28a745'>← Recommended</span>"]
-                    [options_line_c]
-                    ✅ <i>Can enter NOW at market — you're selling puts far below current price; entry timing is less critical for credit spreads</i>
-
-                    <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>[if win_probability < 52: " — consider smaller size" | if win_probability >= 72: " — high-conviction setup"]
+                    <b style="color:#28a745">📈 WHAT TO DO — [if EXECUTE_CALL_OR_LONG_SPREAD: "Buy Now" | else: "Wait for Dip, Then Buy"]</b>
+                    [if EXECUTE_CALL_OR_LONG_SPREAD: "🎯 Enter now at <b style='color:#28a745'>$[final_entry]</b> — momentum confirmed" | else: "🎯 Wait for a pullback to <b style='color:#28a745'>$[final_entry]</b> — price is extended at $[current_price]"]
+                    <b>Target:</b> <b style="color:#28a745">$[final_tp]</b> · <b>Stop:</b> <b style="color:#dc3545">$[final_sl]</b> · <b>R:R</b> [rr_ratio] · Size: ~[suggested_shares] shares / ~[suggested_contracts] contract(s)
+                    <b>Strategy:</b> <i>[if recommended_strategy is "A": strategy_a | if "B": strategy_b | else: strategy_c]</i> — [if recommended_strategy is "A": options_line_a | if "B": options_line_b | else: options_line_c]
+                    <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if >=52, #dc3545 if <52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
+                    <span style="color:#6c757d"><b>S/R Context:</b></span> Support floor <b style="color:#28a745">$[sr_s1]</b> · <b style="color:#28a745">$[sr_s2]</b> · Resistance targets <b style="color:#dc3545">$[sr_r1]</b> → <b style="color:#dc3545">$[sr_r2]</b> → <b style="color:#dc3545">$[sr_r3]</b>
+                    🔴 Flip bearish if breaks <b style="color:#dc3545">$[sr_s1]</b> (S1) → Bear Put Spread · Buy $[alt_bear_put_buy] Put / Sell $[alt_bear_put_sell] Put · Target $[sr_s2] (S2) · Stop $[sr_r1] · exp. [target_expiration]
+                    🟢 Momentum accelerates above <b style="color:#28a745">$[sr_r1]</b> (R1) → add contracts · same strategy one strike higher · next target $[sr_r2] (R2)
                     </div>
-                    <div class="trade-card alt-bear">
-                    <b style="color:#dc3545">⚠️ Bear Scenario — if bullish thesis fails</b>
-                    If [SYMBOL] closes <b>below $[micro_support]</b> on volume → flip to short
-                    Strategy: <i>[the bearish equivalent strategy — e.g. "Bear Put Spread" or "Bear Call Credit Spread"]</i>  ·  Entry <b style="color:#dc3545">$[micro_support]</b>  ·  Target <b style="color:#28a745">$[compute: micro_support − (micro_resistance − micro_support), 2dp]</b>  ·  Stop <b style="color:#dc3545">$[micro_resistance]</b>
-                    </div>
-                    [If total_confluence_score < −15:]
+                    [If total_confluence_score < −15 AND no earnings override:]
                     <div class="trade-card sell">
-                    <b style="color:#dc3545">📉 WHAT TO DO — Strong Sell</b>
-                    [if automated_trade_verdict is EXECUTE_PUT_OR_SHORT_SPREAD: "🎯 <b>Enter now at <b style='color:#dc3545'>$[final_entry]</b></b> — bearish momentum confirmed, sell at market" | else: "🎯 <b>Wait for bounce to <b style='color:#dc3545'>$[final_entry]</b></b> — price is oversold at $[current_price]; <span style='color:#dc3545'>do NOT enter below $[current_price]</span>"]
-                    <b>Target:</b> <b style="color:#28a745">$[final_tp]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[final_sl]</b>  ·  <b>R:R [rr_ratio]</b>  ·  Qty: ~[suggested_shares] shares  /  ~[suggested_contracts] contract(s)
-
-                    <i>Pick ONE — these are alternatives, not a stack:</i>
-                    <b>⚡ A — [strategy_a]</b>[if recommended_strategy equals "A": " <span style='color:#dc3545'>← Recommended</span>"]
-                    [options_line_a]  <i>(max loss = premium paid)</i>
-                    <i>[timing_label]</i>
-
-                    <b>📊 B — [strategy_b]</b>[if recommended_strategy equals "B": " <span style='color:#dc3545'>← Recommended</span>"]
-                    [options_line_b]  <i>(defined risk, capped profit)</i>
-                    <i>[timing_label]</i>
-
-                    <b>💰 C — [strategy_c]</b>[if recommended_strategy equals "C": " <span style='color:#dc3545'>← Recommended</span>"]
-                    [options_line_c]
-                    ✅ <i>Can enter NOW at market — you're selling calls far above current price; entry timing is less critical for credit spreads</i>
-
-                    <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>[if win_probability < 52: " — consider smaller size" | if win_probability >= 72: " — high-conviction setup"]
+                    <b style="color:#dc3545">📉 WHAT TO DO — [if EXECUTE_PUT_OR_SHORT_SPREAD: "Sell Now" | else: "Wait for Bounce, Then Sell"]</b>
+                    [if EXECUTE_PUT_OR_SHORT_SPREAD: "🎯 Enter now at <b style='color:#dc3545'>$[final_entry]</b> — bearish momentum confirmed" | else: "🎯 Wait for a bounce to <b style='color:#dc3545'>$[final_entry]</b> — price is oversold at $[current_price]"]
+                    <b>Target:</b> <b style="color:#28a745">$[final_tp]</b> · <b>Stop:</b> <b style="color:#dc3545">$[final_sl]</b> · <b>R:R</b> [rr_ratio] · Size: ~[suggested_shares] shares / ~[suggested_contracts] contract(s)
+                    <b>Strategy:</b> <i>[if recommended_strategy is "A": strategy_a | if "B": strategy_b | else: strategy_c]</i> — [if recommended_strategy is "A": options_line_a | if "B": options_line_b | else: options_line_c]
+                    <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if >=52, #dc3545 if <52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
+                    <span style="color:#6c757d"><b>S/R Context:</b></span> Resistance wall <b style="color:#dc3545">$[sr_r1]</b> → <b style="color:#dc3545">$[sr_r2]</b> · Support targets <b style="color:#28a745">$[sr_s1]</b> → <b style="color:#28a745">$[sr_s2]</b> → <b style="color:#28a745">$[sr_s3]</b>
+                    🟢 Flip bullish if reclaims <b style="color:#28a745">$[sr_r1]</b> (R1) → Bull Call Spread · Buy $[alt_bull_call_buy] Call / Sell $[alt_bull_call_sell] Call · Target $[sr_r2] (R2) · Stop $[sr_s1] · exp. [target_expiration]
+                    🔴 Momentum accelerates below <b style="color:#dc3545">$[sr_s1]</b> (S1) → add contracts · same strategy one strike lower · next target $[sr_s2] (S2)
                     </div>
-                    <div class="trade-card alt-buy">
-                    <b style="color:#28a745">✅ Bull Scenario — if bearish thesis fails</b>
-                    If [SYMBOL] closes <b>above $[micro_resistance]</b> on volume → flip to long
-                    Strategy: <i>[the bullish equivalent strategy — e.g. "Long Call" or "Bull Call Spread"]</i>  ·  Entry <b style="color:#28a745">$[micro_resistance]</b>  ·  Target <b style="color:#28a745">$[compute: micro_resistance + (micro_resistance − micro_support), 2dp]</b>  ·  Stop <b style="color:#dc3545">$[micro_support]</b>
+                    [If total_confluence_score between −15 and +15 AND no earnings override:]
+                    <div class="trade-card hold">
+                    <b style="color:#ffc107">⏳ WHAT TO DO — Wait for a Clear Signal</b>[if tf_agreement == 0: " <span style='color:#ffc107'>(all timeframes conflicting)</span>"]
+                    <b>Est. Win Rate once triggered:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if >=52, #dc3545 if <52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
+                    <span style="color:#6c757d"><b>S/R Context:</b></span> Resistance <b style="color:#dc3545">$[sr_r1]</b> · <b style="color:#dc3545">$[sr_r2]</b> · Support <b style="color:#28a745">$[sr_s1]</b> · <b style="color:#28a745">$[sr_s2]</b>
+                    🟢 Flip bullish above <b style="color:#28a745">$[sr_r1]</b> (R1) → Bull Call Spread · Buy $[alt_bull_call_buy] Call / Sell $[alt_bull_call_sell] Call · Target $[sr_r2] (R2) · Stop $[sr_s1] · exp. [target_expiration] · ~[suggested_contracts] contract(s)
+                    🔴 Flip bearish below <b style="color:#dc3545">$[sr_s1]</b> (S1) → Bear Put Spread · Buy $[alt_bear_put_buy] Put / Sell $[alt_bear_put_sell] Put · Target $[sr_s2] (S2) · Stop $[sr_r1] · exp. [target_expiration] · ~[suggested_contracts] contract(s)
                     </div>
                     [if swing_trade_signal is SWING_LONG:]
                     <div class="trade-card swing-long">
-                    <b style="color:#28a745">🔄 SWING TRADE — Near Support, Long Opportunity</b>
+                    <b style="color:#28a745">🔄 Swing Trade — Near Support</b>
                     [swing_note]
-                    🎯 <b>Enter near <b style="color:#28a745">$[swing_entry]</b></b> — at or below current price; wait for price to pull back to this zone before entering
-                    <b>Target:</b> <b style="color:#28a745">$[swing_target]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>  ·  <b>Strategy:</b> <i>[swing_strategy]</i>  ·  Holding: days to weeks
-                    Support tested <b>[swing_support_strength]×</b> — stronger the more times it held
+                    🎯 Entry near <b style="color:#28a745">$[swing_entry]</b>  ·  Target <b style="color:#28a745">$[swing_target]</b>  ·  Stop <b style="color:#dc3545">$[swing_stop]</b>  ·  Timeframe: days to weeks
+                    Strategy: <i>[swing_strategy]</i>  ·  Support tested <b>[swing_support_strength]×</b> (more tests = stronger level)
+                    <span style="color:#6c757d"><b>S/R Levels:</b></span> Support floor <b style="color:#28a745">$[sr_s1]</b> · <b style="color:#28a745">$[sr_s2]</b> · <b style="color:#28a745">$[sr_s3]</b> · Targets <b style="color:#dc3545">$[sr_r1]</b> → <b style="color:#dc3545">$[sr_r2]</b> → <b style="color:#dc3545">$[sr_r3]</b>
+                    🔴 Invalidated if closes below <b style="color:#dc3545">$[sr_s2]</b> (S2) — structure breaks
                     <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
                     </div>
                     [if swing_trade_signal is SWING_SHORT:]
                     <div class="trade-card swing-short">
-                    <b style="color:#dc3545">🔄 SWING TRADE — Near Resistance, Short Opportunity</b>
+                    <b style="color:#dc3545">🔄 Swing Trade — Near Resistance</b>
                     [swing_note]
-                    🎯 <b>Enter near <b style="color:#dc3545">$[swing_entry]</b></b> — at or above current price; wait for price to rally into this zone before entering
-                    <b>Target:</b> <b style="color:#28a745">$[swing_target]</b>  ·  <b>Stop:</b> <b style="color:#dc3545">$[swing_stop]</b>  ·  <b>Strategy:</b> <i>[swing_strategy]</i>  ·  Holding: days to weeks
-                    Resistance tested <b>[swing_resistance_strength]×</b> — stronger the more times it rejected
+                    🎯 Entry near <b style="color:#dc3545">$[swing_entry]</b>  ·  Target <b style="color:#28a745">$[swing_target]</b>  ·  Stop <b style="color:#dc3545">$[swing_stop]</b>  ·  Timeframe: days to weeks
+                    Strategy: <i>[swing_strategy]</i>  ·  Resistance tested <b>[swing_resistance_strength]×</b> (more tests = stronger level)
+                    <span style="color:#6c757d"><b>S/R Levels:</b></span> Resistance wall <b style="color:#dc3545">$[sr_r1]</b> · <b style="color:#dc3545">$[sr_r2]</b> · <b style="color:#dc3545">$[sr_r3]</b> · Downside targets <b style="color:#28a745">$[sr_s1]</b> → <b style="color:#28a745">$[sr_s2]</b> → <b style="color:#28a745">$[sr_s3]</b>
+                    🟢 Invalidated if closes above <b style="color:#28a745">$[sr_r2]</b> (R2) — bears lose control
                     <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
                     </div>
                     [if swing_trade_signal is RANGE_PLAY:]
                     <div class="trade-card swing-range">
-                    <b style="color:#ffc107">🔄 RANGE PLAY — Stock Stuck Between Two Levels</b>
+                    <b style="color:#ffc107">🔄 Swing Trade — Range Play</b>
                     [swing_note]
-                    <b>Strategy:</b> <i>[swing_strategy]</i> — collect premium from both sides
-                    <b>Sell Put at:</b> <b style="color:#28a745">$[swing_support]</b>  ·  <b>Sell Call at:</b> <b style="color:#dc3545">$[swing_resistance]</b>
-                    Profit if price stays in range until expiry
+                    Strategy: <i>[swing_strategy]</i> — collect premium while price stays range-bound
+                    Sell Put at <b style="color:#28a745">$[sr_s1]</b> (S1)  ·  Sell Call at <b style="color:#dc3545">$[sr_r1]</b> (R1)  ·  Full range: <b style="color:#28a745">$[sr_s2]</b>–<b style="color:#dc3545">$[sr_r2]</b>
+                    🔴 Exit if breaks below <b style="color:#dc3545">$[sr_s2]</b> or above <b style="color:#28a745">$[sr_r2]</b> — range invalidated
                     <b>Est. Win Rate:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
-                    </div>
-
-                    [If between −15 and +15:]
-                    <div class="trade-card hold">
-                    <b style="color:#ffc107">⏳ WHAT TO DO — Hold & Wait</b> — no clear signal yet, but here's what to do when price moves:
-
-                    <b style="color:#28a745">🟢 If price breaks above <b>$[micro_resistance]</b> → Buy</b>
-                    Strategy: <i>[bullish strategy_name]</i>
-                    <b>Entry:</b> <b>$[micro_resistance]</b>  |  <b style="color:#28a745">Target Profit:</b> <b style="color:#28a745">$[micro_resistance + (micro_resistance − final_sl), 2dp]</b>  |  <b style="color:#dc3545">Stop Loss:</b> <b style="color:#dc3545">$[final_sl]</b>
-                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
-
-                    <b style="color:#dc3545">🔴 If price drops below <b>$[micro_support]</b> → Sell</b>
-                    Strategy: <i>[bearish strategy_name]</i>
-                    <b>Entry:</b> <b>$[micro_support]</b>  |  <b style="color:#28a745">Target Profit:</b> <b style="color:#28a745">$[micro_support − (final_sl − micro_support), 2dp]</b>  |  <b style="color:#dc3545">Stop Loss:</b> <b style="color:#dc3545">$[micro_resistance]</b>
-                    Qty: ~[suggested_shares] shares  or  ~[suggested_contracts] contract(s) (exp. [targetExpiration])
-                    <b>Est. Win Rate once triggered:</b> <span style="color:[#28a745 if win_probability>=65, #ffc107 if win_probability>=52, #dc3545 if win_probability<52]"><b>[win_probability]%</b></span> <i>([win_probability_label])</i>
                     </div>
                     """;
 
@@ -1294,6 +1266,110 @@ public class TradingAgentService {
         return "/no_think\n" + enriched + "\n\n[System Note: Request processed at " + timeStamp + " on " + currentDate + ".]";
     }
 
+    private record ScanResult(String data, String label) {}
+
+    /**
+     * Server-side scanner dispatch — detects scanner intent, calls the Java scanner directly,
+     * and injects the pre-fetched JSON data into the prompt so the AI only needs to format it.
+     * Each scanner has its own try-catch so one failure does not block the others.
+     * Returns null if no scanner intent is detected (fall through to normal AI path).
+     */
+    private ScanResult preFetchScannerData(String enrichedInput) {
+        if (enrichedInput.contains("[Intent: Call generalMarketScannerFunction")) {
+            log.info("[SCANNER] Starting market scan...");
+            try {
+                String data = scannerService.scanMarket();
+                log.info("[SCANNER] Market scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "SCANNER_TEMPLATE (key: scan_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Market scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call bearishScannerFunction")) {
+            log.info("[SCANNER] Starting bearish scan...");
+            try {
+                String data = scannerService.scanBearish();
+                log.info("[SCANNER] Bearish scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "SCANNER_TEMPLATE (key: scan_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Bearish scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call bullishScannerFunction")) {
+            log.info("[SCANNER] Starting bullish scan...");
+            try {
+                String data = scannerService.scanBullish();
+                log.info("[SCANNER] Bullish scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "SCANNER_TEMPLATE (key: scan_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Bullish scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call swingScannerFunction")) {
+            log.info("[SCANNER] Starting swing scan...");
+            try {
+                String data = scannerService.scanSwing();
+                log.info("[SCANNER] Swing scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "SWING_SCANNER_TEMPLATE (key: swing_scan_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Swing scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call preMarketScannerFunction")) {
+            log.info("[SCANNER] Starting pre-market scan...");
+            try {
+                String data = scannerService.scanPreMarket();
+                log.info("[SCANNER] Pre-market scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "PRE_MARKET_TEMPLATE (key: pre_market_scan_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Pre-market scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call wheelStrategyScannerFunction")) {
+            log.info("[SCANNER] Starting wheel strategy scan...");
+            try {
+                String data = scannerService.scanWheelStrategy();
+                log.info("[SCANNER] Wheel scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "WHEEL_TEMPLATE (key: wheel_candidates)");
+            } catch (Exception e) { log.warn("[SCANNER] Wheel scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call sectorRotationScannerFunction")) {
+            log.info("[SCANNER] Starting sector rotation scan...");
+            try {
+                String data = scannerService.scanSectorRotation();
+                log.info("[SCANNER] Sector rotation scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "SECTOR_ROTATION_TEMPLATE (key: sector_rotation_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Sector rotation scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call squeezeScannerFunction")) {
+            log.info("[SCANNER] Starting squeeze scan...");
+            try {
+                String data = scannerService.scanSqueeze();
+                log.info("[SCANNER] Squeeze scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "SQUEEZE_SCANNER_TEMPLATE (key: squeeze_scan_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Squeeze scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call earningsPlaysScannerFunction")) {
+            log.info("[SCANNER] Starting earnings plays scan...");
+            try {
+                String data = scannerService.scanEarningsPlays();
+                log.info("[SCANNER] Earnings scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "EARNINGS_SCANNER_TEMPLATE (key: earnings_scan_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Earnings scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call failedBreakdownScannerFunction")) {
+            log.info("[SCANNER] Starting failed breakdown scan...");
+            try {
+                String data = scannerService.scanFailedBreakdown();
+                log.info("[SCANNER] Failed breakdown scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data, "FAILED_BREAKDOWN_TEMPLATE (key: failed_breakdown_results)");
+            } catch (Exception e) { log.warn("[SCANNER] Failed breakdown scan FAILED: {}", e.getMessage()); return null; }
+        }
+        if (enrichedInput.contains("[Intent: Call watchlistScannerFunction")) {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("tickers=\"([^\"]+)\"").matcher(enrichedInput);
+            String tickers = m.find() ? m.group(1) : "";
+            log.info("[SCANNER] Starting watchlist scan — tickers={}", tickers);
+            try {
+                String data = scannerService.scanWatchlist(tickers);
+                log.info("[SCANNER] Watchlist scan OK — {} chars", data == null ? 0 : data.length());
+                return new ScanResult(data,
+                        "SCANNER_TEMPLATE as a scanner TABLE (key: scan_results) — render as table rows, NOT as individual stock analysis cards");
+            } catch (Exception e) { log.warn("[SCANNER] Watchlist scan FAILED: {}", e.getMessage()); return null; }
+        }
+        return null;
+    }
+
     public Flux<String> streamAgentResponse(String input) {
         return Flux.concat(
             Flux.just("__PROGRESS__:Fetching live market data..."),
@@ -1311,6 +1387,18 @@ public class TradingAgentService {
 
                 long t0 = System.currentTimeMillis();
                 String enrichedInput = injectDynamicContext(input);
+
+                // Pre-fetch scanner data server-side so any model can format it without tool calls
+                ScanResult scanResult = preFetchScannerData(enrichedInput);
+                if (scanResult != null && scanResult.data() != null) {
+                    log.info("[SCANNER-PREFETCH] data fetched ({} chars), injecting into prompt", scanResult.data().length());
+                    enrichedInput = enrichedInput
+                            + "\n\n[PRE-FETCHED SCANNER DATA — render this immediately using "
+                            + scanResult.label()
+                            + ". DO NOT call any tool functions — data is already here:]\n"
+                            + scanResult.data();
+                }
+
                 boolean quickQuestion       = enrichedInput.contains("[Intent: QUICK_QUESTION");
                 boolean directionalQuestion = enrichedInput.contains("[Intent: DIRECTIONAL_QUESTION");
                 var promptSpec = directionalQuestion

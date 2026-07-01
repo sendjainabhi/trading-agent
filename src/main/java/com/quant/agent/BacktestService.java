@@ -28,6 +28,9 @@ public class BacktestService {
     @Value("${alpaca.api.secret}")
     private String apiSecret;
 
+    @Value("${alpaca.data.base-url:https://data.alpaca.markets}")
+    private String alpacaDataBaseUrl;
+
     public record TradeRecord(String entryDate, String exitDate, double entryPrice, double exitPrice,
                                double returnPct, boolean isLong) {}
 
@@ -42,7 +45,7 @@ public class BacktestService {
         String startDate = nowET.minusDays(lookbackDays + 60L).format(DateTimeFormatter.ISO_INSTANT);
 
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("https://data.alpaca.markets/v2/stocks/bars?symbols=" + symbol
+                .uri(URI.create(alpacaDataBaseUrl + "/v2/stocks/bars?symbols=" + symbol
                         + "&timeframe=1Day&start=" + startDate + "&feed=iex"))
                 .header("APCA-API-KEY-ID", apiKey)
                 .header("APCA-API-SECRET-KEY", apiSecret)

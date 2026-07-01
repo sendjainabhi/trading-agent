@@ -19,6 +19,7 @@ import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,12 +57,84 @@ public class StockAnalysisEngine {
         }, 1, 1, TimeUnit.MINUTES);
     }
 
+    // ── Ticker → sector ETF mapping (covers ~100 common names) ───────────────
+    private static final Map<String, String> TICKER_TO_SECTOR_ETF = Map.ofEntries(
+        // Tech / Semiconductors → XLK
+        Map.entry("AAPL",  "XLK"), Map.entry("MSFT",  "XLK"), Map.entry("NVDA",  "XLK"),
+        Map.entry("AMD",   "XLK"), Map.entry("INTC",  "XLK"), Map.entry("AVGO",  "XLK"),
+        Map.entry("QCOM",  "XLK"), Map.entry("ORCL",  "XLK"), Map.entry("CRM",   "XLK"),
+        Map.entry("NOW",   "XLK"), Map.entry("ADBE",  "XLK"), Map.entry("SNOW",  "XLK"),
+        Map.entry("PLTR",  "XLK"), Map.entry("PANW",  "XLK"), Map.entry("CRWD",  "XLK"),
+        Map.entry("ZS",    "XLK"), Map.entry("FTNT",  "XLK"), Map.entry("NET",   "XLK"),
+        Map.entry("AMAT",  "XLK"), Map.entry("LRCX",  "XLK"), Map.entry("KLAC",  "XLK"),
+        Map.entry("MU",    "XLK"), Map.entry("TXN",   "XLK"), Map.entry("ADI",   "XLK"),
+        Map.entry("MRVL",  "XLK"), Map.entry("ARM",   "XLK"), Map.entry("SMCI",  "XLK"),
+        Map.entry("SOUN",  "XLK"), Map.entry("IONQ",  "XLK"), Map.entry("RGTI",  "XLK"),
+        // Communication Services → XLC
+        Map.entry("GOOGL", "XLC"), Map.entry("GOOG",  "XLC"), Map.entry("META",  "XLC"),
+        Map.entry("NFLX",  "XLC"), Map.entry("DIS",   "XLC"), Map.entry("CMCSA", "XLC"),
+        Map.entry("T",     "XLC"), Map.entry("VZ",    "XLC"), Map.entry("TMUS",  "XLC"),
+        Map.entry("SNAP",  "XLC"), Map.entry("PINS",  "XLC"), Map.entry("RDDT",  "XLC"),
+        Map.entry("SPOT",  "XLC"),
+        // Financials → XLF
+        Map.entry("JPM",   "XLF"), Map.entry("BAC",   "XLF"), Map.entry("GS",    "XLF"),
+        Map.entry("WFC",   "XLF"), Map.entry("MS",    "XLF"), Map.entry("C",     "XLF"),
+        Map.entry("V",     "XLF"), Map.entry("MA",    "XLF"), Map.entry("AXP",   "XLF"),
+        Map.entry("BLK",   "XLF"), Map.entry("SCHW",  "XLF"), Map.entry("COF",   "XLF"),
+        Map.entry("PYPL",  "XLF"), Map.entry("SQ",    "XLF"), Map.entry("AFRM",  "XLF"),
+        Map.entry("COIN",  "XLF"),
+        // Healthcare → XLV
+        Map.entry("LLY",   "XLV"), Map.entry("UNH",   "XLV"), Map.entry("JNJ",   "XLV"),
+        Map.entry("MRK",   "XLV"), Map.entry("ABBV",  "XLV"), Map.entry("TMO",   "XLV"),
+        Map.entry("ABT",   "XLV"), Map.entry("DHR",   "XLV"), Map.entry("AMGN",  "XLV"),
+        Map.entry("BMY",   "XLV"), Map.entry("GILD",  "XLV"), Map.entry("BIIB",  "XLV"),
+        Map.entry("REGN",  "XLV"), Map.entry("VRTX",  "XLV"), Map.entry("ISRG",  "XLV"),
+        Map.entry("CVS",   "XLV"), Map.entry("CI",    "XLV"), Map.entry("HUM",   "XLV"),
+        Map.entry("MRNA",  "XLV"), Map.entry("PFE",   "XLV"), Map.entry("NVAX",  "XLV"),
+        // Consumer Discretionary → XLY
+        Map.entry("AMZN",  "XLY"), Map.entry("TSLA",  "XLY"), Map.entry("HD",    "XLY"),
+        Map.entry("NKE",   "XLY"), Map.entry("MCD",   "XLY"), Map.entry("SBUX",  "XLY"),
+        Map.entry("TJX",   "XLY"), Map.entry("GM",    "XLY"), Map.entry("F",     "XLY"),
+        Map.entry("BKNG",  "XLY"), Map.entry("ABNB",  "XLY"), Map.entry("LOW",   "XLY"),
+        Map.entry("CMG",   "XLY"), Map.entry("RIVN",  "XLY"), Map.entry("LCID",  "XLY"),
+        // Consumer Staples → XLP
+        Map.entry("WMT",   "XLP"), Map.entry("PG",    "XLP"), Map.entry("COST",  "XLP"),
+        Map.entry("KO",    "XLP"), Map.entry("PEP",   "XLP"), Map.entry("MDLZ",  "XLP"),
+        Map.entry("CL",    "XLP"), Map.entry("GIS",   "XLP"), Map.entry("MO",    "XLP"),
+        // Energy → XLE
+        Map.entry("XOM",   "XLE"), Map.entry("CVX",   "XLE"), Map.entry("COP",   "XLE"),
+        Map.entry("SLB",   "XLE"), Map.entry("OXY",   "XLE"), Map.entry("PSX",   "XLE"),
+        Map.entry("VLO",   "XLE"), Map.entry("MPC",   "XLE"), Map.entry("EOG",   "XLE"),
+        Map.entry("HAL",   "XLE"), Map.entry("DVN",   "XLE"),
+        // Industrials → XLI
+        Map.entry("CAT",   "XLI"), Map.entry("GE",    "XLI"), Map.entry("HON",   "XLI"),
+        Map.entry("UNP",   "XLI"), Map.entry("RTX",   "XLI"), Map.entry("LMT",   "XLI"),
+        Map.entry("DE",    "XLI"), Map.entry("NOC",   "XLI"), Map.entry("EMR",   "XLI"),
+        Map.entry("FDX",   "XLI"), Map.entry("UPS",   "XLI"), Map.entry("GD",    "XLI"),
+        Map.entry("BA",    "XLI"),
+        // Materials → XLB
+        Map.entry("LIN",   "XLB"), Map.entry("APD",   "XLB"), Map.entry("NEM",   "XLB"),
+        Map.entry("FCX",   "XLB"), Map.entry("SHW",   "XLB"),
+        // Real Estate → XLRE
+        Map.entry("PLD",   "XLRE"), Map.entry("AMT",  "XLRE"), Map.entry("EQIX", "XLRE"),
+        Map.entry("CCI",   "XLRE"), Map.entry("SPG",  "XLRE"),
+        // Utilities → XLU
+        Map.entry("NEE",   "XLU"), Map.entry("DUK",   "XLU"), Map.entry("SO",    "XLU"),
+        Map.entry("D",     "XLU"), Map.entry("AEP",   "XLU")
+    );
+
     // ── Fields ────────────────────────────────────────────────────────────────
 
     final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${market.provider.api-key}")
     String finnhubKey;
+
+    @Value("${market.provider.base-url:https://finnhub.io/api/v1}")
+    String finnhubBaseUrl;
+
+    @Value("${yahoo.finance.base-url:https://query1.finance.yahoo.com}")
+    String yahooBaseUrl;
 
     // ── Injected collaborators ────────────────────────────────────────────────
 
@@ -155,7 +228,7 @@ public class StockAnalysisEngine {
      * Fetches bar data across D1 / H1 / M15 / M5 timeframes, computes all indicators,
      * and returns a JSON fragment (starts with a comma) suitable for embedding in a ticker object.
      */
-    public String processIntradayMtfAlignment(String ticker, double currentPrice, double highToday, double lowToday, long totalVolume, double priorClose, int customDays) throws Exception {
+    public String processIntradayMtfAlignment(String ticker, double currentPrice, double highToday, double lowToday, long totalVolume, double priorClose, int customDays, long yahooAvgVol10d) throws Exception {
         ZonedDateTime nowET = ZonedDateTime.now(ZoneId.of("America/New_York"));
 
         String lookbackD1 = nowET.minusDays(380).format(DateTimeFormatter.ISO_INSTANT); // 380d → ~252 trading bars for 52-week range
@@ -231,6 +304,25 @@ public class StockAnalysisEngine {
         double volumeRatio = 1.0;
         String breakoutType = "NONE";
         double high10d = 0.0;
+        // Phase 2 — new indicator fields
+        double macdLine = 0.0, macdSignal = 0.0, macdHistogram = 0.0;
+        String macdDivergence = "NONE";
+        double bbwPercent = 0.0;
+        boolean bbwSqueeze = false;
+        double vwapZScore = 0.0;
+        String dailyCandlePattern = "NONE";
+        String chartPattern = "NONE";
+        double rvol = 1.0;
+        double putCallRatio = 0.0;
+        double h1RangeHigh = 0.0;
+        double h1RangeLow  = 0.0;
+        List<Double> rejectionRes = new ArrayList<>();
+        List<Double> rejectionSup = new ArrayList<>();
+        double srR1 = 0.0, srR2 = 0.0, srR3 = 0.0;
+        double srS1 = 0.0, srS2 = 0.0, srS3 = 0.0;
+        String sectorEtf   = TICKER_TO_SECTOR_ETF.getOrDefault(ticker.toUpperCase(), "");
+        double sectorRs    = 0.0;
+        String sectorTrend = "NEUTRAL";
 
         String insiderFrom = nowET.minusMonths(3).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
         String insiderTo   = nowET.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
@@ -242,30 +334,26 @@ public class StockAnalysisEngine {
         CompletableFuture<HttpResponse<String>> futureM5 = alpacaClient.httpClient.sendAsync(alpacaClient.buildAlpacaRequest("/bars?symbols=" + ticker + "&timeframe=5Min&start=" + lookback5Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureOptions = alpacaClient.httpClient.sendAsync(alpacaClient.buildAlpacaBaseRequest("/v1beta1/options/snapshots/" + ticker + "?feed=indicative&strike_price_gte=" + (currentPrice * 0.98) + "&strike_price_lte=" + (currentPrice * 1.02) + "&limit=50"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureNews = alpacaClient.httpClient.sendAsync(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("https://data.alpaca.markets/v1beta1/news?symbols=" + ticker + "&limit=20&sort=desc"))
-                        .header("APCA-API-KEY-ID", alpacaClient.apiKey != null ? alpacaClient.apiKey : "")
-                        .header("APCA-API-SECRET-KEY", alpacaClient.apiSecret != null ? alpacaClient.apiSecret : "")
-                        .header("accept", "application/json")
-                        .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
+                alpacaClient.buildAlpacaBaseRequest("/v1beta1/news?symbols=" + ticker + "&limit=20&sort=desc"),
+                HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureEarnings =
-                finnhubAsync("https://finnhub.io/api/v1/calendar/earnings?symbol=" + ticker
+                finnhubAsync(finnhubBaseUrl + "/calendar/earnings?symbol=" + ticker
                         + "&from=" + earningsFrom + "&to=" + earningsTo + "&token=" + finnhubKey);
         CompletableFuture<HttpResponse<String>> futureSpy = alpacaClient.httpClient.sendAsync(
                 alpacaClient.buildAlpacaRequest("/bars?symbols=SPY&timeframe=1Day&start=" + lookback90Days + "&feed=iex"), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureVix = alpacaClient.httpClient.sendAsync(
                 HttpRequest.newBuilder()
-                        .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=5d"))
+                        .uri(URI.create(yahooBaseUrl + "/v8/finance/chart/%5EVIX?interval=1d&range=5d"))
                         .header("User-Agent", "Mozilla/5.0")
                         .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
         CompletableFuture<HttpResponse<String>> futureInsider =
-                finnhubAsync("https://finnhub.io/api/v1/stock/insider-sentiment?symbol=" + ticker
+                finnhubAsync(finnhubBaseUrl + "/stock/insider-sentiment?symbol=" + ticker
                         + "&from=" + insiderFrom + "&to=" + insiderTo + "&token=" + finnhubKey);
         CompletableFuture<HttpResponse<String>> futureRec =
-                finnhubAsync("https://finnhub.io/api/v1/stock/recommendation?symbol=" + ticker
+                finnhubAsync(finnhubBaseUrl + "/stock/recommendation?symbol=" + ticker
                         + "&token=" + finnhubKey);
         CompletableFuture<HttpResponse<String>> futureFhSentiment =
-                finnhubAsync("https://finnhub.io/api/v1/news-sentiment?symbol=" + ticker
+                finnhubAsync(finnhubBaseUrl + "/news-sentiment?symbol=" + ticker
                         + "&token=" + finnhubKey);
         String lookback2Years = nowET.minusDays(730).format(DateTimeFormatter.ISO_INSTANT);
         CompletableFuture<HttpResponse<String>> futureWeekly = alpacaClient.httpClient.sendAsync(
@@ -274,8 +362,21 @@ public class StockAnalysisEngine {
         CompletableFuture<HttpResponse<String>> futureRsp = alpacaClient.httpClient.sendAsync(
                 alpacaClient.buildAlpacaRequest("/bars?symbols=RSP&timeframe=1Day&start=" + lookback90Days + "&feed=iex"),
                 HttpResponse.BodyHandlers.ofString());
+        // Put/Call Ratio — Yahoo Finance options chain (nearest expiry)
+        CompletableFuture<HttpResponse<String>> futurePCR = alpacaClient.httpClient.sendAsync(
+                HttpRequest.newBuilder()
+                        .uri(URI.create(yahooBaseUrl + "/v7/finance/options/" + ticker))
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                        .timeout(Duration.ofSeconds(5)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        // Sector ETF — same lookback as SPY; skipped if ticker not in map
+        CompletableFuture<HttpResponse<String>> futureSectorEtf = sectorEtf.isEmpty()
+                ? CompletableFuture.completedFuture(null)
+                : alpacaClient.httpClient.sendAsync(
+                        alpacaClient.buildAlpacaRequest("/bars?symbols=" + sectorEtf + "&timeframe=1Day&start=" + lookback90Days + "&feed=iex"),
+                        HttpResponse.BodyHandlers.ofString());
 
-        CompletableFuture.allOf(futureD1, futureH1, futureM15, futureM5, futureOptions, futureNews, futureEarnings, futureSpy, futureVix, futureInsider, futureRec, futureFhSentiment, futureWeekly, futureRsp).join();
+        CompletableFuture.allOf(futureD1, futureH1, futureM15, futureM5, futureOptions, futureNews, futureEarnings, futureSpy, futureVix, futureInsider, futureRec, futureFhSentiment, futureWeekly, futureRsp, futurePCR, futureSectorEtf).join();
 
         // ── D1 bars processing ────────────────────────────────────────────────
         if (futureD1.get().statusCode() == 200) {
@@ -286,17 +387,16 @@ public class StockAnalysisEngine {
                 atr14 = IndicatorUtils.calculateAtrFromBars(tickerNode, 14);
                 avgVolume30d = IndicatorUtils.calculateAvgVolumeFromBars(tickerNode, 30);
 
-                // EMA crossover (SMA9 vs SMA21) — previously required a separate historicalTrendFunction call
+                // EMA crossover (true EMA9 vs EMA21) — uses EMA not SMA for correct signal
                 int d1sz = tickerNode.size();
-                double sma9d = IndicatorUtils.calculateSmaFromBars(tickerNode, 9);
-                double sma21d = IndicatorUtils.calculateSmaFromBars(tickerNode, 21);
-                double prevSma9 = 0, prevSma21 = 0;
-                if (d1sz >= 10) { for (int i = d1sz - 10; i < d1sz - 1; i++) prevSma9  += tickerNode.get(i).path("c").asDouble(); prevSma9  /= 9.0; }
-                if (d1sz >= 22) { for (int i = d1sz - 22; i < d1sz - 1; i++) prevSma21 += tickerNode.get(i).path("c").asDouble(); prevSma21 /= 21.0; }
-                if      (sma9d > sma21d && prevSma9 <= prevSma21) emaCrossoverStatus = "Bullish Cross";
-                else if (sma9d < sma21d && prevSma9 >= prevSma21) emaCrossoverStatus = "Bearish Cross";
-                else if (sma9d > sma21d)                          emaCrossoverStatus = "Bullish";
-                else                                               emaCrossoverStatus = "Bearish";
+                double ema9cross     = IndicatorUtils.calculateEmaFromBars(tickerNode, 9);
+                double ema21cross    = IndicatorUtils.calculateEmaFromBars(tickerNode, 21);
+                double prevEma9cross  = d1sz > 9  ? IndicatorUtils.calculateEmaFromBarsOffset(tickerNode, 9, 1)  : ema9cross;
+                double prevEma21cross = d1sz > 21 ? IndicatorUtils.calculateEmaFromBarsOffset(tickerNode, 21, 1) : ema21cross;
+                if      (ema9cross > ema21cross && prevEma9cross <= prevEma21cross) emaCrossoverStatus = "Bullish Cross";
+                else if (ema9cross < ema21cross && prevEma9cross >= prevEma21cross) emaCrossoverStatus = "Bearish Cross";
+                else if (ema9cross > ema21cross)                                    emaCrossoverStatus = "Bullish";
+                else                                                                emaCrossoverStatus = "Bearish";
 
                 calculatedSupport    = atr14 > 0 ? currentPrice - (1.5 * atr14) : currentPrice * 0.96;
                 calculatedResistance = atr14 > 0 ? currentPrice + (1.5 * atr14) : currentPrice * 1.04;
@@ -318,9 +418,11 @@ public class StockAnalysisEngine {
                     if      (pctChg5d >  2.0 && rsiChg5d < -5.0) rsiDivergence = "BEARISH_DIV";
                     else if (pctChg5d < -1.0 && rsiChg5d >  3.0) rsiDivergence = "BULLISH_DIV";
                 }
-                // Rolling HRV distribution — used for IV rank, computed here while tickerNode is in scope
-                if (d1sz >= 42) {
-                    for (int off : new int[]{35, 28, 21, 14, 7, 0}) {
+                // Rolling HRV distribution — sample up to 52 weekly windows for stable IV rank
+                if (d1sz >= 22) {
+                    int maxSamples = Math.min(52, (d1sz - 21) / 5);
+                    for (int s = 0; s < maxSamples; s++) {
+                        int off = s * 5;
                         if (d1sz > off + 21) {
                             double sumLr2 = 0;
                             for (int j = d1sz - off - 20; j < d1sz - off; j++) {
@@ -389,11 +491,57 @@ public class StockAnalysisEngine {
                     microResistance = currentPrice + (1.5 * atr14);
                 }
 
-                // Swing High/Low detection — scan daily bars for local peaks/troughs (5-bar window)
+                // MACD on daily bars — line, signal, histogram + divergence vs 5 bars ago
+                if (d1sz >= 35) {
+                    double[] d1Macd = IndicatorUtils.calculateMacdFromBars(tickerNode);
+                    macdLine = d1Macd[0]; macdSignal = d1Macd[1]; macdHistogram = d1Macd[2];
+                    // Build histogram 5 bars ago for divergence comparison
+                    int histLen = Math.min(d1sz, 10);
+                    double histPrev = 0;
+                    if (d1sz >= 40) {
+                        double k12 = 2.0/13.0, k26 = 2.0/27.0, k9 = 2.0/10.0;
+                        double e12 = tickerNode.get(0).path("c").asDouble();
+                        double e26 = e12;
+                        double[] mh = new double[d1sz - 5];
+                        for (int i = 1; i < d1sz - 5; i++) {
+                            double c = tickerNode.get(i).path("c").asDouble();
+                            e12 = c*k12 + e12*(1-k12); e26 = c*k26 + e26*(1-k26);
+                            mh[i] = e12 - e26;
+                        }
+                        double sig5 = mh[Math.min(26, mh.length-1)];
+                        for (int i = 27; i < mh.length; i++) sig5 = mh[i]*k9 + sig5*(1-k9);
+                        histPrev = mh[mh.length-1] - sig5;
+                    }
+                    double price5ago = d1sz >= 6 ? tickerNode.get(d1sz-6).path("c").asDouble() : currentPrice;
+                    double pctChg5d = price5ago > 0 ? (currentPrice - price5ago)/price5ago*100 : 0;
+                    if      (pctChg5d >  1.5 && macdHistogram < histPrev - 0.001) macdDivergence = "BEARISH_DIV";
+                    else if (pctChg5d < -1.5 && macdHistogram > histPrev + 0.001) macdDivergence = "BULLISH_DIV";
+                }
+
+                // Bollinger Band Width — squeeze detection (20-period, 2σ)
+                if (d1sz >= 20) {
+                    double[] bb = IndicatorUtils.calculateBollingerBands(tickerNode, 20, 2.0);
+                    bbwPercent = bb[3]; // width as % of middle band
+                    // Squeeze: current BBW is below 50th percentile of last 52 weeks
+                    // Approximated: BBW < 5% is historically tight for most stocks
+                    bbwSqueeze = bbwPercent < 5.0 && bbwPercent > 0;
+                }
+
+                // Daily candlestick reversal pattern
+                if (d1sz >= 2) {
+                    dailyCandlePattern = IndicatorUtils.detectDailyCandlePattern(tickerNode);
+                }
+
+                // Multi-bar chart pattern (NR7, Inside Bar, Bull Flag, Bear Flag)
+                if (d1sz >= 10) {
+                    chartPattern = IndicatorUtils.detectChartPattern(tickerNode, atr14);
+                }
+
+                // Swing High/Low detection — scan daily bars for local peaks/troughs (±5 bar window)
                 if (d1sz >= 10) {
                     List<Double> swingHighsList = new ArrayList<>();
                     List<Double> swingLowsList  = new ArrayList<>();
-                    int win = 2;
+                    int win = 5;
                     for (int i = win; i < d1sz - win; i++) {
                         double h = tickerNode.get(i).path("h").asDouble();
                         double l = tickerNode.get(i).path("l").asDouble();
@@ -427,6 +575,26 @@ public class StockAnalysisEngine {
                             .filter(h -> Math.abs(h - sr) <= tol).count();
                     }
                 }
+                // Rejection wick S/R — bars where price was strongly repelled (last 60 daily bars).
+                // Upper wick > 55% of range = bearish rejection → resistance at that high.
+                // Lower wick > 55% of range = bullish rejection → support at that low.
+                {
+                    int lb = Math.min(60, d1sz - 1);
+                    for (int i = d1sz - lb; i < d1sz - 1; i++) {
+                        double o = tickerNode.get(i).path("o").asDouble();
+                        double h = tickerNode.get(i).path("h").asDouble();
+                        double l = tickerNode.get(i).path("l").asDouble();
+                        double c = tickerNode.get(i).path("c").asDouble();
+                        double rng = h - l;
+                        if (rng < currentPrice * 0.003 || l <= 0) continue;
+                        double upperWick = h - Math.max(o, c);
+                        double lowerWick = Math.min(o, c) - l;
+                        if (upperWick > 0 && upperWick / rng > 0.55 && upperWick / h > 0.004)
+                            rejectionRes.add(h);
+                        if (lowerWick > 0 && lowerWick / rng > 0.55 && lowerWick / l > 0.004)
+                            rejectionSup.add(l);
+                    }
+                }
                 // MA stack score — how many of EMA8>EMA21>EMA50>EMA200 are aligned (0–4)
                 if (d1sz >= 50) {
                     ema8d   = IndicatorUtils.calculateEmaFromBars(tickerNode, 8);
@@ -448,9 +616,23 @@ public class StockAnalysisEngine {
             }
         }
 
-        // Volume ratio and breakout type — derived from D1 data
+        // Volume source fix: override IEX-based avgVolume30d with Yahoo consolidated avg when available
+        // IEX covers ~15% of total tape, so the two sources can't be compared directly.
+        if (yahooAvgVol10d > 0) avgVolume30d = yahooAvgVol10d;
+
+        // Volume ratio (consolidated-to-consolidated after fix above)
         if (avgVolume30d > 0 && totalVolume > 0) {
             volumeRatio = (double) totalVolume / avgVolume30d;
+        }
+
+        // RVOL — time-of-day adjusted relative volume
+        // Compares current session volume vs what the average day has at this same time
+        if (yahooAvgVol10d > 0 && totalVolume > 0) {
+            int hour = nowET.getHour(), minute = nowET.getMinute();
+            double elapsedHours = Math.max(0.05, (hour - 9) + (minute - 30) / 60.0);
+            double fractionOfDay = Math.min(1.0, elapsedHours / 6.5);
+            double expectedVolSoFar = yahooAvgVol10d * fractionOfDay;
+            rvol = Math.min(20.0, totalVolume / expectedVolSoFar);
         }
         if ("Bullish Cross".equals(emaCrossoverStatus)) {
             breakoutType = "FRESH_CROSS";
@@ -473,6 +655,17 @@ public class StockAnalysisEngine {
                 double priceVsEmaScore = ema26h > 0 ? IndicatorUtils.normalizeScore((currentPrice - ema26h) / ema26h, 2500.0) : 0.0;
                 double rsiH1Score = (rsiH1 - 50.0) * 2.0;
                 h1Score = (priceVsEmaScore * 0.40) + (macdScore * 0.35) + (rsiH1Score * 0.25);
+                // H1 range high/low — last 10 H1 bars as intraday structural S/R
+                int h1sz = tickerNode.size();
+                double h1Hi = 0.0, h1Lo = 0.0;
+                for (int i = h1sz - Math.min(10, h1sz); i < h1sz; i++) {
+                    double bh = tickerNode.get(i).path("h").asDouble();
+                    double bl = tickerNode.get(i).path("l").asDouble();
+                    if (bh > h1Hi) h1Hi = bh;
+                    if (bl > 0 && (h1Lo == 0 || bl < h1Lo)) h1Lo = bl;
+                }
+                if (h1Hi > 0) h1RangeHigh = h1Hi;
+                if (h1Lo > 0) h1RangeLow  = h1Lo;
             }
         }
 
@@ -502,7 +695,10 @@ public class StockAnalysisEngine {
                 JsonNode lastCandle = tickerNode.get(size - 1);
 
                 long lastCandleTime = Instant.parse(lastCandle.path("t").asText()).getEpochSecond();
-                long startOfDayEpoch = Instant.ofEpochSecond(lastCandleTime).atZone(ZoneId.of("America/New_York")).toLocalDate().atStartOfDay(ZoneId.of("America/New_York")).toEpochSecond();
+                // VWAP resets at market open (9:30 AM ET) — not midnight
+                long startOfDayEpoch = Instant.ofEpochSecond(lastCandleTime)
+                        .atZone(ZoneId.of("America/New_York")).toLocalDate()
+                        .atTime(9, 30, 0).atZone(ZoneId.of("America/New_York")).toEpochSecond();
 
                 double cumulativeTPV = 0; double cumulativeVol = 0;
                 List<double[]> tpvPairs = new ArrayList<>();
@@ -525,6 +721,8 @@ public class StockAnalysisEngine {
                     double vwapStd = Math.sqrt(sumDevSq / cumulativeVol);
                     vwapUpper = vwap + vwapStd;
                     vwapLower = vwap - vwapStd;
+                    // Z-Score: how many std deviations the current price is from VWAP
+                    if (vwapStd > 0) vwapZScore = (currentPrice - vwap) / vwapStd;
                 }
                 double m5c1 = lastCandle.path("c").asDouble();
                 double m5c2 = size >= 2 ? tickerNode.get(size - 2).path("c").asDouble() : m5c1;
@@ -625,6 +823,24 @@ public class StockAnalysisEngine {
             }
         } catch (Exception ignored) {}
 
+        // ── Put/Call Ratio from Yahoo Finance options chain ───────────────────
+        try {
+            if (futurePCR.get() != null && futurePCR.get().statusCode() == 200) {
+                JsonNode optRoot = objectMapper.readTree(futurePCR.get().body())
+                        .path("optionChain").path("result");
+                if (optRoot.isArray() && !optRoot.isEmpty()) {
+                    JsonNode opts = optRoot.get(0).path("options");
+                    if (opts.isArray() && !opts.isEmpty()) {
+                        JsonNode chain = opts.get(0);
+                        long callVol = 0, putVol = 0;
+                        for (JsonNode c : chain.path("calls")) callVol += c.path("volume").asLong(0);
+                        for (JsonNode p : chain.path("puts"))  putVol  += p.path("volume").asLong(0);
+                        if (callVol > 0) putCallRatio = (double) putVol / callVol;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
         // ── Smart money: insider sentiment + analyst consensus ────────────────
         double smartMoneyScore = 0.0;
         double insiderMspr    = 0.0;
@@ -672,8 +888,25 @@ public class StockAnalysisEngine {
 
         smartMoneyScore = Math.max(-100.0, Math.min(100.0, smartMoneyScore));
 
-        String smartMoneyVerdict = smartMoneyScore > 25 ? "ACCUMULATING" :
-                                   smartMoneyScore < -25 ? "DISTRIBUTING" : "NEUTRAL";
+        // Verdict: insider MSPR is actual money-at-risk (primary signal).
+        // Analyst ratings are biased toward Buy so only flag when truly lopsided.
+        String smartMoneyVerdict;
+        if (insiderBuys > 0 || insiderSells > 0) {
+            // Insider data available — use MSPR as primary
+            if      (insiderMspr > 10)  smartMoneyVerdict = "ACCUMULATING";
+            else if (insiderMspr < -10) smartMoneyVerdict = "DISTRIBUTING";
+            else                        smartMoneyVerdict = "NEUTRAL";
+        } else if (analystBuy + analystHold + analystSell > 0) {
+            // No insider data — analyst consensus only when strongly lopsided
+            int    total   = analystBuy + analystHold + analystSell;
+            double buyPct  = (double) analystBuy  / total;
+            double sellPct = (double) analystSell / total;
+            if      (buyPct  > 0.70) smartMoneyVerdict = "ACCUMULATING";
+            else if (sellPct > 0.30) smartMoneyVerdict = "DISTRIBUTING";
+            else                     smartMoneyVerdict = "NEUTRAL";
+        } else {
+            smartMoneyVerdict = "NEUTRAL";
+        }
 
         // Timeframe agreement: how many of D1/H1/15M/5M align on direction (-4 to +4)
         boolean d1TrendUp   = "Bullish".equals(emaCrossoverStatus) || "Bullish Cross".equals(emaCrossoverStatus);
@@ -816,6 +1049,63 @@ public class StockAnalysisEngine {
                 }
             }
         } catch (Exception ignored) {}
+
+        // ── Sector relative strength vs SPY (20-day return spread) ───────────
+        try {
+            if (!sectorEtf.isEmpty() && futureSectorEtf.get() != null && futureSectorEtf.get().statusCode() == 200) {
+                JsonNode sectorBars = objectMapper.readTree(futureSectorEtf.get().body()).path("bars").path(sectorEtf);
+                if (sectorBars.isArray() && sectorBars.size() >= 21) {
+                    int sz = sectorBars.size();
+                    double latest = sectorBars.get(sz - 1).path("c").asDouble();
+                    double ago20  = sectorBars.get(sz - 21).path("c").asDouble();
+                    double sectorReturn = ago20 > 0 ? (latest - ago20) / ago20 * 100.0 : 0.0;
+                    sectorRs = sectorReturn - spy20dReturn; // +ve = sector beating SPY
+                    if      (sectorRs >  3.0) sectorTrend = "STRONG_INFLOW";
+                    else if (sectorRs >  1.0) sectorTrend = "INFLOW";
+                    else if (sectorRs < -3.0) sectorTrend = "STRONG_OUTFLOW";
+                    else if (sectorRs < -1.0) sectorTrend = "OUTFLOW";
+                    else                      sectorTrend = "NEUTRAL";
+                    // Sector RS multiplier: headwind/tailwind on top of market regime
+                    double sectorMult = 1.0;
+                    if      ("STRONG_INFLOW".equals(sectorTrend))  sectorMult = totalConfluenceScore > 0 ? 1.12 : 0.90;
+                    else if ("INFLOW".equals(sectorTrend))         sectorMult = totalConfluenceScore > 0 ? 1.06 : 0.95;
+                    else if ("STRONG_OUTFLOW".equals(sectorTrend)) sectorMult = totalConfluenceScore > 0 ? 0.88 : 1.12;
+                    else if ("OUTFLOW".equals(sectorTrend))        sectorMult = totalConfluenceScore > 0 ? 0.95 : 1.06;
+                    totalConfluenceScore = Math.max(-100.0, Math.min(100.0, totalConfluenceScore * sectorMult));
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // ── Deterministic S/R: pool all sources, sort, deduplicate, pick R1–R3 + S1–S3 ──
+        {
+            List<Double> res = new ArrayList<>(), sup = new ArrayList<>();
+            double cp = currentPrice;
+            for (double v : new double[]{microResistance, priorDayHigh, vwapUpper, swingResistance,
+                    h1RangeHigh, calculatedResistance, ema8d, ema21d, ema50d, ema200d}) {
+                if (v > cp * 1.001) res.add(v);
+            }
+            for (double v : rejectionRes) { if (v > cp * 1.001) res.add(v); }
+            for (double v : new double[]{microSupport, priorDayLow, vwapLower, swingSupport,
+                    h1RangeLow, calculatedSupport, ema8d, ema21d, ema50d, ema200d}) {
+                if (v > 0 && v < cp * 0.999) sup.add(v);
+            }
+            for (double v : rejectionSup) { if (v > 0 && v < cp * 0.999) sup.add(v); }
+            res.sort(null);
+            sup.sort((a, b) -> Double.compare(b, a));
+            List<Double> rd = new ArrayList<>(), sd = new ArrayList<>();
+            for (double v : res) {
+                if (rd.isEmpty() || Math.abs(v - rd.get(rd.size()-1)) / v > 0.005) rd.add(v);
+            }
+            for (double v : sup) {
+                if (sd.isEmpty() || Math.abs(v - sd.get(sd.size()-1)) / v > 0.005) sd.add(v);
+            }
+            srR1 = !rd.isEmpty() ? rd.get(0) : Math.round(cp * 1.01 * 100) / 100.0;
+            srR2 = rd.size() > 1 ? rd.get(1) : Math.round(cp * 1.02 * 100) / 100.0;
+            srR3 = rd.size() > 2 ? rd.get(2) : Math.round(cp * 1.03 * 100) / 100.0;
+            srS1 = !sd.isEmpty() ? sd.get(0) : Math.round(cp * 0.99 * 100) / 100.0;
+            srS2 = sd.size() > 1 ? sd.get(1) : Math.round(cp * 0.98 * 100) / 100.0;
+            srS3 = sd.size() > 2 ? sd.get(2) : Math.round(cp * 0.97 * 100) / 100.0;
+        }
 
         // ── Composite trend score (0–100): weekly + MA stack + ADX slope + breadth + TF ──
         {
@@ -1198,20 +1488,24 @@ public class StockAnalysisEngine {
         else                      buyStrength = "STRONG_SELL";
 
         // Pre-computed human-readable signal sentences — model outputs these verbatim, no translation needed
+        // RSI threshold aligned with Rule A display label (50 boundary) to prevent contradictions in output
+        // MACD labeled as "1-hour" to distinguish from daily MACD histogram shown in Trend line
         StringBuilder buySignalsStr  = new StringBuilder();
         StringBuilder sellSignalsStr = new StringBuilder();
-        if (aboveSma20)      buySignalsStr.append("price is above the 20-day average, ");
-        if (belowSma20)      sellSignalsStr.append("price is below the 20-day average, ");
-        if (rsiBullish)      buySignalsStr.append("RSI momentum is healthy, ");
-        if (rsiBearish)      sellSignalsStr.append("RSI is weak or overbought, ");
-        if (macdBullish)     buySignalsStr.append("MACD is rising, ");
-        if (macdBearish)     sellSignalsStr.append("MACD is falling, ");
-        if (aboveVwap)       buySignalsStr.append("price is above today's average (VWAP), ");
-        if (belowVwap)       sellSignalsStr.append("price is below today's average (VWAP), ");
-        if (hourlyRising)    buySignalsStr.append("hourly trend is up, ");
-        if (hourlyFalling)   sellSignalsStr.append("hourly trend is down, ");
-        if (volConfirmsBuy)  buySignalsStr.append("volume confirms the move");
-        if (volConfirmsSell) sellSignalsStr.append("volume confirms the move");
+        if (aboveSma20)                       buySignalsStr.append("price is above the 20-day average, ");
+        if (belowSma20)                       sellSignalsStr.append("price is below the 20-day average, ");
+        if (rsiBullish && rsi14 >= 50)        buySignalsStr.append("RSI momentum is healthy, ");
+        else if (rsiBullish)                  buySignalsStr.append("RSI is in neutral zone, ");
+        if (rsiBearish && rsi14 < 50)         sellSignalsStr.append("RSI momentum is weak, ");
+        else if (rsiBearish)                  sellSignalsStr.append("RSI is overbought, ");
+        if (macdBullish)                      buySignalsStr.append("1-hour MACD is rising, ");
+        if (macdBearish)                      sellSignalsStr.append("1-hour MACD is falling, ");
+        if (aboveVwap)                        buySignalsStr.append("price is above today's VWAP, ");
+        if (belowVwap)                        sellSignalsStr.append("price is below today's VWAP, ");
+        if (hourlyRising)                     buySignalsStr.append("hourly trend is up, ");
+        if (hourlyFalling)                    sellSignalsStr.append("hourly trend is down, ");
+        if (volConfirmsBuy)                   buySignalsStr.append("volume confirms the move");
+        if (volConfirmsSell)                  sellSignalsStr.append("volume confirms the move");
         String activeBuySignals  = buySignalsStr.length()  > 0
                 ? buySignalsStr.toString().replaceAll(",\\s*$", "")
                 : "No buy signals active";
@@ -1330,35 +1624,54 @@ public class StockAnalysisEngine {
                          : "C".equals(recommendedStrategy) ? optionsLineC : optionsLineB;
         }
 
-        // Confidence score: percentage of signals agreeing with the final verdict direction
+        // Confidence score: percentage of independent signals agreeing with the final verdict direction
+        // Uses 9 signals: candlestick pattern + MACD divergence replace the correlated aboveSma20+d1TrendUp pair
         {
             boolean bullVerdict = totalConfluenceScore >= 15.0 && !forceNeutral;
             boolean bearVerdict = totalConfluenceScore <= -15.0 && !forceNeutral;
-            int aligned = 0, total = 8;
+            int aligned = 0, total = 9;
             if (bullVerdict) {
-                if (aboveSma20)     aligned++;
-                if (rsiBullish)     aligned++;
-                if (macdBullish)    aligned++;
-                if (aboveVwap)      aligned++;
-                if (hourlyRising)   aligned++;
-                if (volConfirmsBuy) aligned++;
-                if (d1TrendUp)      aligned++;
-                if (tfAgreement >= 2) aligned++;
+                if (rsiBullish)                                                              aligned++;
+                if (macdBullish)                                                             aligned++;
+                if (aboveVwap)                                                               aligned++;
+                if (hourlyRising)                                                            aligned++;
+                if (volConfirmsBuy)                                                          aligned++;
+                if (d1TrendUp)                                                               aligned++;
+                if (tfAgreement >= 2)                                                        aligned++;
+                // Independent candlestick confirmation (not just trend following)
+                if ("HAMMER".equals(dailyCandlePattern) || "BULLISH_ENGULFING".equals(dailyCandlePattern)
+                        || "BULLISH_MARUBOZU".equals(dailyCandlePattern))                   aligned++;
+                // MACD divergence absence: no bearish divergence = clean momentum
+                if (!"BEARISH_DIV".equals(macdDivergence))                                  aligned++;
             } else if (bearVerdict) {
-                if (belowSma20)      aligned++;
-                if (rsiBearish)      aligned++;
-                if (macdBearish)     aligned++;
-                if (belowVwap)       aligned++;
-                if (hourlyFalling)   aligned++;
-                if (volConfirmsSell) aligned++;
-                if (d1TrendDown)     aligned++;
-                if (tfAgreement <= -2) aligned++;
+                if (rsiBearish)                                                              aligned++;
+                if (macdBearish)                                                             aligned++;
+                if (belowVwap)                                                               aligned++;
+                if (hourlyFalling)                                                           aligned++;
+                if (volConfirmsSell)                                                         aligned++;
+                if (d1TrendDown)                                                             aligned++;
+                if (tfAgreement <= -2)                                                       aligned++;
+                // Independent candlestick confirmation
+                if ("SHOOTING_STAR".equals(dailyCandlePattern) || "BEARISH_ENGULFING".equals(dailyCandlePattern)
+                        || "BEARISH_MARUBOZU".equals(dailyCandlePattern))                   aligned++;
+                // MACD divergence absence: no bullish divergence = clean downtrend
+                if (!"BULLISH_DIV".equals(macdDivergence))                                  aligned++;
             } else {
                 aligned = 4; // neutral = middle confidence
             }
             confidenceScore = (int)((double) aligned / total * 100);
             confidenceLabel = confidenceScore >= 75 ? "High" : confidenceScore >= 50 ? "Moderate" : "Low";
         }
+
+        // Realign buyStrength with totalConfluenceScore + confidenceScore so header,
+        // signal label, and trade card are always consistent with each other.
+        // netSignal-based buyStrength (computed earlier) can disagree with the hold
+        // verdict when a few strong signals dominate but most signals are neutral.
+        if      (totalConfluenceScore > 15 && confidenceScore >= 65) buyStrength = "STRONG_BUY";
+        else if (totalConfluenceScore > 15)                          buyStrength = "BUY";
+        else if (totalConfluenceScore < -15 && confidenceScore >= 65) buyStrength = "STRONG_SELL";
+        else if (totalConfluenceScore < -15)                          buyStrength = "SELL";
+        else                                                          buyStrength = "WATCH";
 
         // Gate D — Setup Confidence: EXECUTE requires ≥60% of signals aligned.
         // Prevents a heavy-weighted single signal (e.g. strong SMA20) pushing score to 72
@@ -1474,7 +1787,19 @@ public class StockAnalysisEngine {
                 + ",\"strategy_c\":\"%s\",\"options_line_c\":\"%s\""
                 + ",\"recommended_strategy\":\"%s\""
                 + ",\"volume_ratio\":%.2f,\"breakout_type\":\"%s\""
-                + ",\"timing_label\":\"%s\"",
+                + ",\"timing_label\":\"%s\""
+                + ",\"macd_line\":%.4f,\"macd_signal\":%.4f,\"macd_histogram\":%.4f,\"macd_divergence\":\"%s\""
+                + ",\"bbw_percent\":%.2f,\"bbw_squeeze\":%b"
+                + ",\"vwap_zscore\":%.2f"
+                + ",\"daily_candle_pattern\":\"%s\""
+                + ",\"chart_pattern\":\"%s\""
+                + ",\"rvol\":%.2f"
+                + ",\"put_call_ratio\":%.2f"
+                + ",\"alt_bear_put_buy\":%.2f,\"alt_bear_put_sell\":%.2f"
+                + ",\"alt_bull_call_buy\":%.2f,\"alt_bull_call_sell\":%.2f"
+                + ",\"sector_etf\":\"%s\",\"sector_rs\":%.2f,\"sector_trend\":\"%s\""
+                + ",\"sr_r1\":%.2f,\"sr_r2\":%.2f,\"sr_r3\":%.2f"
+                + ",\"sr_s1\":%.2f,\"sr_s2\":%.2f,\"sr_s3\":%.2f",
                 sessionStatus, dailyScore, h1Score, m15Score, m5Score, totalConfluenceScore, vwap, microSupport, microResistance, impliedVolatility * 100, tomorrowUpper, tomorrowLower, nextWeekUpper, nextWeekLower, customUpper, customLower, effectiveCustomDays, dynamicVerdict, dynamicEntry, dynamicTp, dynamicSl, strikeBuy, spreadShortStrike, strikeSell, targetExpiration, strategyName, optionsLine, emaCrossoverStatus, rsi14, calculatedSupport, calculatedResistance,
                 buyStrength, buyScore, sellScore, rsi14,
                 activeBuySignals, activeSellSignals,
@@ -1511,7 +1836,19 @@ public class StockAnalysisEngine {
                 strategyC, optionsLineC.replace("\"", "'"),
                 recommendedStrategy,
                 volumeRatio, breakoutType,
-                timingLabel.replace("\"", "'"));
+                timingLabel.replace("\"", "'"),
+                macdLine, macdSignal, macdHistogram, macdDivergence,
+                bbwPercent, bbwSqueeze,
+                vwapZScore,
+                dailyCandlePattern,
+                chartPattern,
+                rvol,
+                putCallRatio,
+                icPutSell, icPutBuy,
+                icCallSell, icCallBuy,
+                sectorEtf, sectorRs, sectorTrend,
+                srR1, srR2, srR3,
+                srS1, srS2, srS3);
     }
 
     // ── Single-ticker scan (Yahoo snapshot + full MTF) — cached 30 s ─────────
@@ -1526,11 +1863,11 @@ public class StockAnalysisEngine {
             return cached.json();
         }
         double currentPrice = 0, priorClose = 0, highToday = 0, lowToday = 0;
-        long vol = 0;
+        long vol = 0, yahooAvgVol = 0;
 
         try {
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
+                    .uri(URI.create(yahooBaseUrl + "/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
             HttpResponse<String> res = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
             if (res.statusCode() == 200) {
@@ -1543,6 +1880,7 @@ public class StockAnalysisEngine {
                     vol         = meta.path("regularMarketVolume").asLong(0);
                     highToday   = meta.path("regularMarketDayHigh").asDouble(regularPrice);
                     lowToday    = meta.path("regularMarketDayLow").asDouble(regularPrice);
+                    yahooAvgVol = meta.path("averageDailyVolume10Day").asLong(0);
                     currentPrice = regularPrice;
                     JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
                     if (closes != null && closes.isArray() && !closes.isEmpty()) {
@@ -1579,7 +1917,7 @@ public class StockAnalysisEngine {
         try {
             double percentChange = (priorClose > 0) ? ((currentPrice - priorClose) / priorClose) * 100.0 : 0.0;
             String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
-            String mtf  = processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, 0);
+            String mtf  = processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, 0, yahooAvgVol);
             String base = String.format("{\"symbol\":\"%s\",\"current_price\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\"}",
                     ticker, currentPrice, pctString, String.format("%,d", vol));
             String result = base.substring(0, base.length() - 1) + mtf + "}";
@@ -1600,7 +1938,7 @@ public class StockAnalysisEngine {
 
         try {
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=5m&range=1d"))
+                    .uri(URI.create(yahooBaseUrl + "/v8/finance/chart/" + ticker + "?includePrePost=true&interval=5m&range=1d"))
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                     .timeout(Duration.ofSeconds(6)).GET().build();
             HttpResponse<String> res = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
@@ -1659,14 +1997,13 @@ public class StockAnalysisEngine {
         try {
             if (preBars.isEmpty() || priorClose <= 0) return null;
             double pmChangePercent = ((preMarketPrice - priorClose) / priorClose) * 100.0;
-            if (Math.abs(pmChangePercent) < 0.5 && totalPreVolume < 5_000) return null;
             if (preMarketPrice < 5.0) return null;
 
             String pattern = detectPreMarketPattern(preBars, pmChangePercent, priorClose);
             if (pmHigh <= 0)              pmHigh = preMarketPrice * 1.005;
             if (pmLow == Double.MAX_VALUE) pmLow  = preMarketPrice * 0.995;
 
-            String mtf      = processIntradayMtfAlignment(ticker, preMarketPrice, pmHigh, pmLow, totalPreVolume, priorClose, 0);
+            String mtf      = processIntradayMtfAlignment(ticker, preMarketPrice, pmHigh, pmLow, totalPreVolume, priorClose, 0, 0L);
             String pctString = String.format("%s%.2f%%", pmChangePercent >= 0 ? "+" : "", pmChangePercent);
             String base      = String.format("{\"symbol\":\"%s\",\"current_price\":%.2f,\"percent_change\":\"%s\",\"pre_market_volume\":\"%s\",\"pattern\":\"%s\"}",
                     ticker, preMarketPrice, pctString, String.format("%,d", totalPreVolume), pattern);
@@ -1722,11 +2059,11 @@ public class StockAnalysisEngine {
             return cached.json();
         }
         double currentPrice = 0, priorClose = 0, highToday = 0, lowToday = 0;
-        long vol = 0;
+        long vol = 0, yahooAvgVol = 0;
 
         try {
             HttpRequest liveRequest = HttpRequest.newBuilder()
-                    .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
+                    .uri(URI.create(yahooBaseUrl + "/v8/finance/chart/" + ticker + "?includePrePost=true&interval=1m&range=1d"))
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
             HttpResponse<String> res = alpacaClient.httpClient.send(liveRequest, HttpResponse.BodyHandlers.ofString());
             if (res.statusCode() == 200) {
@@ -1739,6 +2076,7 @@ public class StockAnalysisEngine {
                     vol        = meta.path("regularMarketVolume").asLong(0);
                     highToday  = meta.path("regularMarketDayHigh").asDouble(regularPrice);
                     lowToday   = meta.path("regularMarketDayLow").asDouble(regularPrice);
+                    yahooAvgVol = meta.path("averageDailyVolume10Day").asLong(0);
                     currentPrice = regularPrice;
                     JsonNode closes = resultNode.path("indicators").path("quote").get(0).path("close");
                     if (closes != null && closes.isArray() && !closes.isEmpty()) {
@@ -1777,7 +2115,7 @@ public class StockAnalysisEngine {
             String pctString = String.format("%s%.2f%%", (percentChange >= 0 ? "+" : ""), percentChange);
             String payload = String.format("{\"symbol\":\"%s\",\"company_name\":\"%s\",\"current_price\":%.2f,\"change\":%.2f,\"percent_change\":\"%s\",\"volume\":\"%s\",\"high_today\":%.2f,\"low_today\":%.2f}",
                     ticker, ticker, currentPrice, currentPrice - priorClose, pctString, String.format("%,d", vol), highToday, lowToday);
-            String result = payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, customDays) + "}";
+            String result = payload.substring(0, payload.length() - 1) + processIntradayMtfAlignment(ticker, currentPrice, highToday, lowToday, vol, priorClose, customDays, yahooAvgVol) + "}";
             analysisCache.put(cacheKey, new CachedScan(result, Instant.now()));
             return result;
         } catch (Exception e) {
@@ -1871,7 +2209,7 @@ public class StockAnalysisEngine {
         try {
             // 1. Analyst consensus
             HttpResponse<String> recResp = finnhubAsync(
-                "https://finnhub.io/api/v1/stock/recommendation?symbol=" + sym + "&token=" + finnhubKey)
+                finnhubBaseUrl + "/stock/recommendation?symbol=" + sym + "&token=" + finnhubKey)
                 .get(6, TimeUnit.SECONDS);
             if (recResp != null && recResp.statusCode() == 200) {
                 JsonNode arr = objectMapper.readTree(recResp.body());
@@ -1889,7 +2227,7 @@ public class StockAnalysisEngine {
             String fromDate = now.minusMonths(3).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
             String toDate   = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
             HttpResponse<String> insiderResp = finnhubAsync(
-                "https://finnhub.io/api/v1/stock/insider-sentiment?symbol=" + sym
+                finnhubBaseUrl + "/stock/insider-sentiment?symbol=" + sym
                 + "&from=" + fromDate + "&to=" + toDate + "&token=" + finnhubKey)
                 .get(6, TimeUnit.SECONDS);
             if (insiderResp != null && insiderResp.statusCode() == 200) {
@@ -1907,7 +2245,7 @@ public class StockAnalysisEngine {
             String eFrom = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
             String eTo   = now.plusDays(14).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
             HttpResponse<String> earningsResp = finnhubAsync(
-                "https://finnhub.io/api/v1/calendar/earnings?from=" + eFrom + "&to=" + eTo
+                finnhubBaseUrl + "/calendar/earnings?from=" + eFrom + "&to=" + eTo
                 + "&symbol=" + sym + "&token=" + finnhubKey)
                 .get(6, TimeUnit.SECONDS);
             if (earningsResp != null && earningsResp.statusCode() == 200) {

@@ -42,13 +42,18 @@ public class MarketScannerService {
 
     // ── Sector ETF drill-down — when a sector ETF moves >1.5%, add its top stocks ─
 
-    private static final Map<String, List<String>> SECTOR_ETF_HOLDINGS = Map.of(
-        "CIBR", List.of("CRWD","PANW","FTNT","ZS","S","OKTA","CYBR","TENB","CRDO","NET"),
-        "SMH",  List.of("NVDA","AVGO","MU","AMAT","KLAC","LRCX","ON","MRVL","QCOM","AMD"),
-        "XLF",  List.of("JPM","BAC","GS","WFC","MS","C","V","MA","BLK","SCHW"),
-        "XLE",  List.of("XOM","CVX","COP","SLB","OXY","PSX","VLO","MPC","EOG","HAL"),
-        "XBI",  List.of("MRNA","BNTX","REGN","VRTX","GILD","BIIB","EXAS","IONS","PCVX"),
-        "ARKK", List.of("TSLA","COIN","RBLX","PATH","EXAS","TWLO","ROKU","SQ","HOOD")
+    private static final Map<String, List<String>> SECTOR_ETF_HOLDINGS = Map.ofEntries(
+        Map.entry("XLK",  List.of("NVDA","AAPL","MSFT","META","GOOGL","AVGO","AMD","QCOM","ORCL","CRM")),
+        Map.entry("XLF",  List.of("JPM","BAC","GS","WFC","MS","C","V","MA","BLK","SCHW")),
+        Map.entry("XLE",  List.of("XOM","CVX","COP","SLB","OXY","PSX","VLO","MPC","EOG","HAL")),
+        Map.entry("XLI",  List.of("CAT","GE","HON","UNP","RTX","LMT","DE","NOC","EMR","FDX")),
+        Map.entry("XLV",  List.of("LLY","UNH","JNJ","MRK","ABBV","TMO","ABT","DHR","AMGN","BMY")),
+        Map.entry("XLY",  List.of("AMZN","TSLA","HD","NKE","MCD","SBUX","TJX","GM","F","BKNG")),
+        Map.entry("XLP",  List.of("WMT","PG","COST","KO","PEP","MDLZ","CL","GIS","K","HRL")),
+        Map.entry("XLRE", List.of("PLD","AMT","EQIX","SPG","CCI","PSA","O","WELL","DLR","IRM")),
+        Map.entry("XLU",  List.of("NEE","DUK","SO","D","AEP","EXC","SRE","PCG","ED","XEL")),
+        Map.entry("CIBR", List.of("CRWD","PANW","FTNT","ZS","S","OKTA","CYBR","TENB","CRDO","NET")),
+        Map.entry("XBI",  List.of("MRNA","BNTX","REGN","VRTX","GILD","BIIB","EXAS","IONS","PCVX","INCY"))
     );
 
     private List<String> fetchSectorExpansion() {
@@ -58,7 +63,7 @@ public class MarketScannerService {
             futures.add(CompletableFuture.runAsync(() -> {
                 try {
                     HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/"
+                        .uri(URI.create(engine.yahooBaseUrl + "/v8/finance/chart/"
                             + entry.getKey() + "?interval=1d&range=2d"))
                         .header("User-Agent", "Mozilla/5.0")
                         .timeout(java.time.Duration.ofSeconds(5)).GET().build();
@@ -86,7 +91,7 @@ public class MarketScannerService {
         return expansion;
     }
 
-    /** Composite rank: confluence + volume bonus + breakout bonus */
+    /** Composite rank: |confluence| + volume bonus + breakout bonus — always positive, works for both bull/bear scans */
     private double compositeRankScore(String result) {
         double confluence  = engine.extractConfluenceScore(result);
         double volRatio    = engine.extractVolumeRatio(result);
@@ -95,7 +100,7 @@ public class MarketScannerService {
         double brkBonus    = "FRESH_CROSS".equals(breakout) ? 20.0
                            : "ABOVE_EMA50".equals(breakout) ? 15.0
                            : "RANGE_BREAK".equals(breakout) ? 10.0 : 0.0;
-        return confluence + volBonus + brkBonus;
+        return Math.abs(confluence) + volBonus + brkBonus;
     }
 
     // ── Shared screener fetch helper ──────────────────────────────────────────
@@ -119,8 +124,8 @@ public class MarketScannerService {
             if (tickers.size() >= targetSize) break;
             try {
                 String url = scrId.equals("trending")
-                        ? "https://query1.finance.yahoo.com/v1/finance/trending/US"
-                        : "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds="
+                        ? engine.yahooBaseUrl + "/v1/finance/trending/US"
+                        : engine.yahooBaseUrl + "/v1/finance/screener/predefined/saved?scrIds="
                           + scrId + "&count=" + perPage + "&fields=symbol,regularMarketPrice,regularMarketVolume";
                 HttpRequest req = HttpRequest.newBuilder().uri(URI.create(url))
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
@@ -155,15 +160,17 @@ public class MarketScannerService {
 
     /**
      * Runs {@code engine.scanTicker()} concurrently for all tickers and returns the raw results.
+     * Each ticker is isolated — one failure does not cancel the rest.
      */
     private List<String> runConcurrentScan(List<String> tickers) {
         List<CompletableFuture<String>> futures = new ArrayList<>();
         for (String t : tickers) futures.add(CompletableFuture.supplyAsync(() -> engine.scanTicker(t)));
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         List<String> results = new ArrayList<>();
         for (CompletableFuture<String> f : futures) {
-            String r = f.join();
-            if (r != null) results.add(r);
+            try {
+                String r = f.join();
+                if (r != null) results.add(r);
+            } catch (Exception ignored) {}
         }
         return results;
     }
@@ -201,9 +208,7 @@ public class MarketScannerService {
         if (tickers.isEmpty()) return "{\"error\":\"No eligible tickers found.\"}";
 
         List<String> results = runConcurrentScan(tickers);
-        results.sort((a, b) -> Double.compare(
-                Math.abs(compositeRankScore(b)),
-                Math.abs(compositeRankScore(a))));
+        results.sort((a, b) -> Double.compare(compositeRankScore(b), compositeRankScore(a)));
         return buildScanResponse(results.subList(0, Math.min(5, results.size())), "scan_results");
     }
 
@@ -284,7 +289,7 @@ public class MarketScannerService {
         // Append Yahoo most-actives to catch any fresh names not in the static list
         try {
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create("https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=most_actives&count=10&fields=symbol,regularMarketPrice,regularMarketVolume"))
+                    .uri(URI.create(engine.yahooBaseUrl + "/v1/finance/screener/predefined/saved?scrIds=most_actives&count=10&fields=symbol,regularMarketPrice,regularMarketVolume"))
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)").GET().build();
             HttpResponse<String> resp = alpacaClient.httpClient.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() == 200) {
@@ -424,13 +429,9 @@ public class MarketScannerService {
                 futures.add(CompletableFuture.supplyAsync(() -> {
                     try {
                         // Bars — 65 days to support EMA50 + 60d high calc
-                        String barsUrl = "https://data.alpaca.markets/v2/stocks/bars?symbols=" + sym
-                            + "&timeframe=1Day&start=" + startDate + "&end=" + endDate
-                            + "&limit=65&feed=iex";
-                        HttpRequest barsReq = HttpRequest.newBuilder()
-                            .uri(URI.create(barsUrl))
-                            .header("APCA-API-KEY-ID", alpacaClient.apiKey)
-                            .header("APCA-API-SECRET-KEY", alpacaClient.apiSecret).GET().build();
+                        HttpRequest barsReq = alpacaClient.buildAlpacaRequest(
+                            "/bars?symbols=" + sym + "&timeframe=1Day&start=" + startDate
+                            + "&end=" + endDate + "&limit=65&feed=iex");
                         HttpResponse<String> barsResp = alpacaClient.httpClient.send(
                             barsReq, HttpResponse.BodyHandlers.ofString());
                         if (barsResp.statusCode() != 200) return null;
@@ -476,13 +477,10 @@ public class MarketScannerService {
                         boolean nearSupport = low20d > 0 && price >= low20d && price <= low20d * 1.06;
 
                         // Options snapshot — derive IV
-                        String optUrl = "https://data.alpaca.markets/v1beta1/options/snapshots/" + sym
+                        HttpRequest optReq = alpacaClient.buildAlpacaBaseRequest(
+                            "/v1beta1/options/snapshots/" + sym
                             + "?feed=indicative&strike_price_gte=" + String.format("%.2f", price * 0.90)
-                            + "&strike_price_lte=" + String.format("%.2f", price * 1.10) + "&limit=30";
-                        HttpRequest optReq = HttpRequest.newBuilder()
-                            .uri(URI.create(optUrl))
-                            .header("APCA-API-KEY-ID", alpacaClient.apiKey)
-                            .header("APCA-API-SECRET-KEY", alpacaClient.apiSecret).GET().build();
+                            + "&strike_price_lte=" + String.format("%.2f", price * 1.10) + "&limit=30");
                         HttpResponse<String> optResp = alpacaClient.httpClient.send(
                             optReq, HttpResponse.BodyHandlers.ofString());
                         double iv = 0;
@@ -500,8 +498,23 @@ public class MarketScannerService {
                             }
                             if (ivCnt > 0) iv = ivSum / ivCnt;
                         }
-                        // IV rank gate: 0.25–0.65
-                        if (iv < 0.25 || iv > 0.65) return null;
+                        // Fallback: estimate IV from 20-day historical volatility when options data is thin
+                        if (iv < 0.10 && bars.size() >= 22) {
+                            double[] logReturns = new double[20];
+                            for (int i = bars.size() - 20; i < bars.size(); i++) {
+                                double c0 = bars.get(i - 1).path("c").asDouble(0);
+                                double c1 = bars.get(i).path("c").asDouble(0);
+                                logReturns[i - (bars.size() - 20)] = (c0 > 0 && c1 > 0) ? Math.log(c1 / c0) : 0;
+                            }
+                            double mean = 0;
+                            for (double r : logReturns) mean += r;
+                            mean /= logReturns.length;
+                            double variance = 0;
+                            for (double r : logReturns) variance += (r - mean) * (r - mean);
+                            iv = Math.sqrt((variance / logReturns.length) * 252.0);
+                        }
+                        // IV gate: 0.18–1.50 (18%–150% annualised). HV-derived IV allowed.
+                        if (iv < 0.18 || iv > 1.50) return null;
 
                         // Expected-move lower bound for the week: price - price×IV×√(7/365)
                         double expectedMoveLower = price - price * iv * Math.sqrt(7.0 / 365.0);
@@ -608,7 +621,7 @@ public class MarketScannerService {
             List<WheelCandidate> qualified = new ArrayList<>();
             for (WheelCandidate c : phase1) {
                 StockAnalysisEngine.WheelQuality q = engine.fetchWheelQuality(c.ticker());
-                boolean qualityPass = q.analystBuyPct() >= 60 || q.insiderMspr() > 10;
+                boolean qualityPass = q.analystBuyPct() >= 45 || q.insiderMspr() > 5;
                 if (!qualityPass && !c.isEtf()) continue; // ETFs bypass quality check
                 boolean earningsThisWeek = q.earningsDaysAway() <= 7;
                 // Earnings this week → skip NEW put sell but still include for CC display
@@ -760,7 +773,7 @@ public class MarketScannerService {
             if (fhKey != null && !fhKey.isBlank()) {
                 newsFutures.put(sym, alpacaClient.httpClient.sendAsync(
                     HttpRequest.newBuilder()
-                        .uri(URI.create("https://finnhub.io/api/v1/news-sentiment?symbol=" + sym + "&token=" + fhKey))
+                        .uri(URI.create(engine.finnhubBaseUrl + "/news-sentiment?symbol=" + sym + "&token=" + fhKey))
                         .timeout(java.time.Duration.ofSeconds(4)).GET().build(),
                     HttpResponse.BodyHandlers.ofString()));
             }

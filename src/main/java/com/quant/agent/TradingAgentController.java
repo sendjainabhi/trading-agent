@@ -6,6 +6,7 @@ import java.io.StringReader;
 import java.util.Properties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
@@ -35,6 +36,18 @@ public class TradingAgentController {
     private static final Logger log = LoggerFactory.getLogger(TradingAgentController.class);
     private static final ZoneId ET = ZoneId.of("America/New_York");
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    @Value("${yahoo.finance.base-url:https://query1.finance.yahoo.com}")
+    private String yahooBaseUrl;
+
+    @Value("${tradingview.scanner.futures-url:https://scanner.tradingview.com/futures/scan}")
+    private String tradingviewFuturesUrl;
+
+    @Value("${tradingview.scanner.stocks-url:https://scanner.tradingview.com/america/scan}")
+    private String tradingviewStocksUrl;
+
+    @Value("${tradingview.scanner.origin:https://www.tradingview.com}")
+    private String tradingviewOrigin;
 
     private final TradingAgentService tradingAgentService;
     private final AlpacaStreamService alpacaStreamService;
@@ -95,7 +108,7 @@ public class TradingAgentController {
 
         try {
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create("https://query1.finance.yahoo.com/v8/finance/chart/"
+                    .uri(URI.create(yahooBaseUrl + "/v8/finance/chart/"
                             + sym + "?interval=1m&range=1d&includePrePost=true"))
                     .header("User-Agent", "Mozilla/5.0").timeout(Duration.ofSeconds(8)).GET().build();
             HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
@@ -167,8 +180,8 @@ public class TradingAgentController {
             List<String> tickers = futures ? futuresTickers : equityTickers;
             if (tickers.isEmpty()) continue;
             String endpoint = futures
-                ? "https://scanner.tradingview.com/futures/scan"
-                : "https://scanner.tradingview.com/america/scan";
+                ? tradingviewFuturesUrl
+                : tradingviewStocksUrl;
             try {
                 String tickerJson = tickers.stream()
                     .map(t -> "\"" + t + "\"")
@@ -180,8 +193,8 @@ public class TradingAgentController {
                     .uri(URI.create(endpoint))
                     .header("Content-Type", "application/json")
                     .header("User-Agent", "Mozilla/5.0")
-                    .header("Origin", "https://www.tradingview.com")
-                    .header("Referer", "https://www.tradingview.com/")
+                    .header("Origin", tradingviewOrigin)
+                    .header("Referer", tradingviewOrigin + "/")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .timeout(Duration.ofSeconds(6))
                     .build();
@@ -326,7 +339,7 @@ public class TradingAgentController {
         try {
             String encoded = URLEncoder.encode(q.trim(), StandardCharsets.UTF_8);
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create("https://query1.finance.yahoo.com/v1/finance/search?q=" + encoded
+                    .uri(URI.create(yahooBaseUrl + "/v1/finance/search?q=" + encoded
                             + "&lang=en-US&region=US&quotesCount=8&newsCount=0"))
                     .header("User-Agent", "Mozilla/5.0")
                     .timeout(Duration.ofSeconds(3))

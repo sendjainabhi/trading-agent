@@ -31,6 +31,9 @@ public class MarketClockService {
     @Value("${alpaca.api.secret}")
     private String apiSecret;
 
+    @Value("${alpaca.broker.base-url:https://api.alpaca.markets}")
+    private String alpacaBrokerBaseUrl;
+
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
@@ -63,7 +66,7 @@ public class MarketClockService {
         if (Instant.now().isBefore(cacheExpiry)) return; // re-check under lock
         try {
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create("https://api.alpaca.markets/v2/clock"))
+                    .uri(URI.create(alpacaBrokerBaseUrl + "/v2/clock"))
                     .header("APCA-API-KEY-ID", apiKey)
                     .header("APCA-API-SECRET-KEY", apiSecret)
                     .GET()
