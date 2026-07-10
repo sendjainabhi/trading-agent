@@ -91,16 +91,28 @@ public class MarketScannerService {
         return expansion;
     }
 
-    /** Composite rank: |confluence| + volume bonus + breakout bonus — always positive, works for both bull/bear scans */
+    /** Composite rank: |confluence| + volume bonus + breakout bonus + fan/structure bonus */
     private double compositeRankScore(String result) {
         double confluence  = engine.extractConfluenceScore(result);
         double volRatio    = engine.extractVolumeRatio(result);
         String breakout    = engine.extractBreakoutType(result);
+        String fanState    = engine.extractFanState(result);
+        String structure   = engine.extractMarketStructure(result);
+        boolean strBreak   = engine.extractStructureBreak(result);
+        boolean bullish    = confluence >= 0;
+
         double volBonus    = volRatio >= 2.0 ? 10.0 : volRatio >= 1.5 ? 5.0 : 0.0;
         double brkBonus    = "FRESH_CROSS".equals(breakout) ? 20.0
                            : "ABOVE_EMA50".equals(breakout) ? 15.0
                            : "RANGE_BREAK".equals(breakout) ? 10.0 : 0.0;
-        return Math.abs(confluence) + volBonus + brkBonus;
+        // Wide fan = strong trend conviction; structure intact = trend reliable
+        double fanBonus    = (bullish && "WIDE_BULL".equals(fanState))  ?  15.0
+                           : (!bullish && "WIDE_BEAR".equals(fanState)) ?  15.0
+                           : "COMPRESSING".equals(fanState)             ? -10.0 : 0.0;
+        double strBonus    = strBreak ? -20.0
+                           : (bullish && "BULLISH".equals(structure))   ?  10.0
+                           : (!bullish && "BEARISH".equals(structure))  ?  10.0 : 0.0;
+        return Math.abs(confluence) + volBonus + brkBonus + fanBonus + strBonus;
     }
 
     // ── Shared screener fetch helper ──────────────────────────────────────────
@@ -1006,10 +1018,17 @@ public class MarketScannerService {
         for (String t : screenerTickers) if (!universe.contains(t)) universe.add(t);
 
         List<String> results = runConcurrentScan(universe);
-        // Primary filter: ADX < 22 (flat/choppy = coiling)
-        results.removeIf(r -> engine.extractAdxValue(r) >= 22.0);
-        // Sort: lowest ADX first (tightest squeeze), then by iv_rank ascending (cheapest options)
+        // Primary filter: ADX < 22 (flat/choppy = coiling) OR fan is COMPRESSING (EMAs converging)
+        results.removeIf(r -> {
+            boolean adxOk  = engine.extractAdxValue(r) < 22.0;
+            boolean fanOk  = "COMPRESSING".equals(engine.extractFanState(r));
+            return !adxOk && !fanOk; // keep if either condition signals a coil
+        });
+        // Sort: COMPRESSING fan first, then lowest ADX, then cheapest options
         results.sort((a, b) -> {
+            boolean aComp = "COMPRESSING".equals(engine.extractFanState(a));
+            boolean bComp = "COMPRESSING".equals(engine.extractFanState(b));
+            if (aComp != bComp) return aComp ? -1 : 1;
             int adxCmp = Double.compare(engine.extractAdxValue(a), engine.extractAdxValue(b));
             if (adxCmp != 0) return adxCmp;
             return Double.compare(engine.extractIvRank(a), engine.extractIvRank(b));

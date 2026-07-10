@@ -222,6 +222,18 @@ public class StockAnalysisEngine {
         try { return objectMapper.readTree(json).path("breakout_type").asText("NONE"); } catch (Exception e) { return "NONE"; }
     }
 
+    public String extractFanState(String json) {
+        try { return objectMapper.readTree(json).path("fan_state").asText("NEUTRAL"); } catch (Exception e) { return "NEUTRAL"; }
+    }
+
+    public String extractMarketStructure(String json) {
+        try { return objectMapper.readTree(json).path("market_structure").asText("NEUTRAL"); } catch (Exception e) { return "NEUTRAL"; }
+    }
+
+    public boolean extractStructureBreak(String json) {
+        try { return objectMapper.readTree(json).path("structure_break").asBoolean(false); } catch (Exception e) { return false; }
+    }
+
     // ── Core multi-timeframe alignment engine ─────────────────────────────────
 
     /**
@@ -293,7 +305,17 @@ public class StockAnalysisEngine {
         String confidenceLabel = "Moderate";
         int maStackScore = 0;
         String maStackLabel = "Unconfirmed";
-        double ema8d = 0.0, ema21d = 0.0, ema50d = 0.0, ema200d = 0.0;
+        double ema5d = 0.0, ema13d = 0.0, ema21d = 0.0, ema50d = 0.0, ema200d = 0.0;
+        String fanState = "NEUTRAL";
+        double fanSpreadPct = 0.0;
+        String marketStructure = "NEUTRAL";
+        boolean structureBreak = false;
+        double fibR1 = 0.0, fibR2 = 0.0, fibR3 = 0.0;
+        double fibS1 = 0.0, fibS2 = 0.0, fibS3 = 0.0;
+        double volumePoc = 0.0;
+        double stochRsiK = 50.0;
+        double pivotPP = 0.0, pivotR1d = 0.0, pivotR2d = 0.0, pivotS1d = 0.0, pivotS2d = 0.0;
+        double gapResistance = 0.0, gapSupport = 0.0;
         String weeklyBias = "NEUTRAL";
         double weeklyEma20 = 0.0, weeklyEma50 = 0.0;
         String marketBreadth = "NEUTRAL";
@@ -387,15 +409,15 @@ public class StockAnalysisEngine {
                 atr14 = IndicatorUtils.calculateAtrFromBars(tickerNode, 14);
                 avgVolume30d = IndicatorUtils.calculateAvgVolumeFromBars(tickerNode, 30);
 
-                // EMA crossover (true EMA9 vs EMA21) — uses EMA not SMA for correct signal
+                // EMA crossover (EMA5 vs EMA13 — fast triple-fan signal, fires 3–5 bars earlier than EMA9/21)
                 int d1sz = tickerNode.size();
-                double ema9cross     = IndicatorUtils.calculateEmaFromBars(tickerNode, 9);
-                double ema21cross    = IndicatorUtils.calculateEmaFromBars(tickerNode, 21);
-                double prevEma9cross  = d1sz > 9  ? IndicatorUtils.calculateEmaFromBarsOffset(tickerNode, 9, 1)  : ema9cross;
-                double prevEma21cross = d1sz > 21 ? IndicatorUtils.calculateEmaFromBarsOffset(tickerNode, 21, 1) : ema21cross;
-                if      (ema9cross > ema21cross && prevEma9cross <= prevEma21cross) emaCrossoverStatus = "Bullish Cross";
-                else if (ema9cross < ema21cross && prevEma9cross >= prevEma21cross) emaCrossoverStatus = "Bearish Cross";
-                else if (ema9cross > ema21cross)                                    emaCrossoverStatus = "Bullish";
+                double ema5cross      = IndicatorUtils.calculateEmaFromBars(tickerNode, 5);
+                double ema13cross     = IndicatorUtils.calculateEmaFromBars(tickerNode, 13);
+                double prevEma5cross  = d1sz > 5  ? IndicatorUtils.calculateEmaFromBarsOffset(tickerNode, 5, 1)  : ema5cross;
+                double prevEma13cross = d1sz > 13 ? IndicatorUtils.calculateEmaFromBarsOffset(tickerNode, 13, 1) : ema13cross;
+                if      (ema5cross > ema13cross && prevEma5cross <= prevEma13cross) emaCrossoverStatus = "Bullish Cross";
+                else if (ema5cross < ema13cross && prevEma5cross >= prevEma13cross) emaCrossoverStatus = "Bearish Cross";
+                else if (ema5cross > ema13cross)                                    emaCrossoverStatus = "Bullish";
                 else                                                                emaCrossoverStatus = "Bearish";
 
                 calculatedSupport    = atr14 > 0 ? currentPrice - (1.5 * atr14) : currentPrice * 0.96;
@@ -595,25 +617,123 @@ public class StockAnalysisEngine {
                             rejectionSup.add(l);
                     }
                 }
-                // MA stack score — how many of EMA8>EMA21>EMA50>EMA200 are aligned (0–4)
-                if (d1sz >= 50) {
-                    ema8d   = IndicatorUtils.calculateEmaFromBars(tickerNode, 8);
+                // Market structure: sequence the last 2 swing highs and lows into HH/HL/LH/LL
+                if (d1sz >= 10) {
+                    List<Double> shList = new ArrayList<>(), slList = new ArrayList<>();
+                    int win2 = 5;
+                    for (int i = win2; i < d1sz - win2; i++) {
+                        double h = tickerNode.get(i).path("h").asDouble();
+                        double l = tickerNode.get(i).path("l").asDouble();
+                        boolean isH = true, isL = true;
+                        for (int j = 1; j <= win2; j++) {
+                            if (tickerNode.get(i - j).path("h").asDouble() >= h) isH = false;
+                            if (tickerNode.get(i + j).path("h").asDouble() >= h) isH = false;
+                            if (tickerNode.get(i - j).path("l").asDouble() <= l) isL = false;
+                            if (tickerNode.get(i + j).path("l").asDouble() <= l) isL = false;
+                        }
+                        if (isH) shList.add(h);
+                        if (isL)  slList.add(l);
+                    }
+                    if (shList.size() >= 2 && slList.size() >= 2) {
+                        double sh1 = shList.get(shList.size() - 2), sh2 = shList.get(shList.size() - 1);
+                        double sl1 = slList.get(slList.size() - 2), sl2 = slList.get(slList.size() - 1);
+                        boolean hh = sh2 > sh1, hl = sl2 > sl1, lh = sh2 < sh1, ll = sl2 < sl1;
+                        if      (hh && hl)  marketStructure = "BULLISH";    // HH + HL = uptrend intact
+                        else if (lh && ll)  marketStructure = "BEARISH";    // LH + LL = downtrend intact
+                        else if (hh && ll)  marketStructure = "EXPANDING";  // diverging highs/lows
+                        else if (lh && hl)  marketStructure = "CONTRACTING"; // converging highs/lows
+                        // Structure break: uptrend but latest swing low broke below previous
+                        structureBreak = ("BULLISH".equals(marketStructure) && sl2 < sl1 * 0.99)
+                                      || ("BEARISH".equals(marketStructure) && sh2 > sh1 * 1.01);
+                    }
+                }
+
+                // Fibonacci retracements between swing support and swing resistance
+                if (swingSupport > 0 && swingResistance > 0 && swingResistance > swingSupport) {
+                    double range = swingResistance - swingSupport;
+                    // Levels from top down — resistance zone in pullback
+                    fibR1 = swingResistance - 0.236 * range;
+                    fibR2 = swingResistance - 0.382 * range;
+                    fibR3 = swingResistance - 0.500 * range;
+                    fibS1 = swingResistance - 0.618 * range;
+                    fibS2 = swingResistance - 0.786 * range;
+                    fibS3 = swingSupport;
+                }
+
+                // Volume Profile POC from last 60 daily bars
+                if (d1sz >= 20) {
+                    volumePoc = IndicatorUtils.calculateVolumePoc(tickerNode, Math.min(60, d1sz));
+                }
+
+                // Stochastic RSI from daily bars
+                if (d1sz >= 30) {
+                    double[] stoch = IndicatorUtils.calculateStochRsiFromBars(tickerNode, 14, 14);
+                    stochRsiK = stoch[0];
+                }
+
+                // Gap analysis — unfilled price gaps from last 40 daily bars
+                if (d1sz >= 5) {
+                    double cp = currentPrice;
+                    int gapLookback = Math.min(40, d1sz - 1);
+                    double nearestGapRes = Double.MAX_VALUE, nearestGapSup = 0.0;
+                    for (int i = d1sz - gapLookback; i < d1sz; i++) {
+                        double prevHigh  = tickerNode.get(i - 1).path("h").asDouble(0);
+                        double prevLow   = tickerNode.get(i - 1).path("l").asDouble(0);
+                        double thisLow   = tickerNode.get(i).path("l").asDouble(0);
+                        double thisHigh  = tickerNode.get(i).path("h").asDouble(0);
+                        if (prevHigh <= 0 || prevLow <= 0 || thisLow <= 0 || thisHigh <= 0) continue;
+                        // Gap up: today's low > prior high
+                        if (thisLow > prevHigh * 1.001) {
+                            double gapFill = prevHigh; // gap fills back to prior high
+                            if (gapFill < cp && gapFill > nearestGapSup) nearestGapSup = gapFill;
+                        }
+                        // Gap down: today's high < prior low
+                        if (thisHigh < prevLow * 0.999) {
+                            double gapFill = prevLow; // gap fills back to prior low
+                            if (gapFill > cp && gapFill < nearestGapRes) nearestGapRes = gapFill;
+                        }
+                    }
+                    if (nearestGapRes < Double.MAX_VALUE) gapResistance = nearestGapRes;
+                    if (nearestGapSup > 0)               gapSupport    = nearestGapSup;
+                }
+
+                // MA stack score — how many of price>EMA5>EMA13>EMA21>EMA50>EMA200 aligned (0–5)
+                if (d1sz >= 21) {
+                    ema5d   = IndicatorUtils.calculateEmaFromBars(tickerNode, 5);
+                    ema13d  = IndicatorUtils.calculateEmaFromBars(tickerNode, 13);
                     ema21d  = IndicatorUtils.calculateEmaFromBars(tickerNode, 21);
-                    ema50d  = IndicatorUtils.calculateEmaFromBars(tickerNode, 50);
+                    ema50d  = d1sz >= 50  ? IndicatorUtils.calculateEmaFromBars(tickerNode, 50)  : 0.0;
                     ema200d = d1sz >= 200 ? IndicatorUtils.calculateEmaFromBars(tickerNode, 200) : 0.0;
-                    if (currentPrice > ema8d)               maStackScore++;
-                    if (ema8d        > ema21d)              maStackScore++;
-                    if (ema21d       > ema50d)              maStackScore++;
-                    if (ema200d > 0 && ema50d > ema200d)    maStackScore++;
-                    // If EMA200 unavailable cap at 3
-                    int maxStack = ema200d > 0 ? 4 : 3;
-                    maStackLabel = (maStackScore == maxStack)         ? "Full Bull"
-                                 : (maStackScore >= maxStack - 1)     ? "Strong"
-                                 : (maStackScore == 2)                ? "Mixed"
-                                 : (maStackScore == 1)                ? "Weak"
-                                 :                                      "Full Bear";
+                    if (currentPrice > ema5d)             maStackScore++;
+                    if (ema5d  > ema13d)                  maStackScore++;
+                    if (ema13d > ema21d)                  maStackScore++;
+                    if (ema50d  > 0 && ema21d > ema50d)   maStackScore++;
+                    if (ema200d > 0 && ema50d > ema200d)  maStackScore++;
+                    int maxStack = ema200d > 0 ? 5 : ema50d > 0 ? 4 : 3;
+                    maStackLabel = (maStackScore == maxStack)     ? "Full Bull"
+                                 : (maStackScore >= maxStack - 1) ? "Strong"
+                                 : (maStackScore >= maxStack - 2) ? "Mixed"
+                                 : (maStackScore == 1)            ? "Weak"
+                                 :                                  "Full Bear";
+                    // Wide Fan: spread between EMA5 and EMA21 as % of price
+                    fanSpreadPct = ema21d > 0 ? Math.abs(ema5d - ema21d) / ema21d * 100.0 : 0.0;
+                    boolean bullOrdered = ema5d > ema13d && ema13d > ema21d;
+                    boolean bearOrdered = ema5d < ema13d && ema13d < ema21d;
+                    if      (fanSpreadPct >= 3.0 && bullOrdered) fanState = "WIDE_BULL";
+                    else if (fanSpreadPct >= 3.0 && bearOrdered) fanState = "WIDE_BEAR";
+                    else if (fanSpreadPct < 1.0)                 fanState = "COMPRESSING";
+                    else                                          fanState = "NEUTRAL";
                 }
             }
+        }
+
+        // Daily pivot points from prior day H/L/C — fixed intraday levels watched by market makers
+        if (priorDayHigh > 0 && priorDayLow > 0 && priorClose > 0) {
+            pivotPP  = (priorDayHigh + priorDayLow + priorClose) / 3.0;
+            pivotR1d = 2.0 * pivotPP - priorDayLow;
+            pivotR2d = pivotPP + (priorDayHigh - priorDayLow);
+            pivotS1d = 2.0 * pivotPP - priorDayHigh;
+            pivotS2d = pivotPP - (priorDayHigh - priorDayLow);
         }
 
         // Volume source fix: override IEX-based avgVolume30d with Yahoo consolidated avg when available
@@ -1080,15 +1200,35 @@ public class StockAnalysisEngine {
         {
             List<Double> res = new ArrayList<>(), sup = new ArrayList<>();
             double cp = currentPrice;
+            // Core levels + EMAs
             for (double v : new double[]{microResistance, priorDayHigh, vwapUpper, swingResistance,
-                    h1RangeHigh, calculatedResistance, ema8d, ema21d, ema50d, ema200d}) {
+                    h1RangeHigh, calculatedResistance, ema5d, ema13d, ema21d, ema50d, ema200d}) {
                 if (v > cp * 1.001) res.add(v);
             }
+            // Fibonacci resistance levels
+            for (double v : new double[]{fibR1, fibR2, fibR3}) { if (v > cp * 1.001) res.add(v); }
+            // Volume POC
+            if (volumePoc > cp * 1.001) res.add(volumePoc);
+            // Pivot points resistance
+            for (double v : new double[]{pivotPP, pivotR1d, pivotR2d}) { if (v > cp * 1.001) res.add(v); }
+            // Unfilled gap resistance
+            if (gapResistance > cp * 1.001) res.add(gapResistance);
+            // Rejection wicks
             for (double v : rejectionRes) { if (v > cp * 1.001) res.add(v); }
+
+            // Support levels
             for (double v : new double[]{microSupport, priorDayLow, vwapLower, swingSupport,
-                    h1RangeLow, calculatedSupport, ema8d, ema21d, ema50d, ema200d}) {
+                    h1RangeLow, calculatedSupport, ema5d, ema13d, ema21d, ema50d, ema200d}) {
                 if (v > 0 && v < cp * 0.999) sup.add(v);
             }
+            // Fibonacci support levels
+            for (double v : new double[]{fibS1, fibS2, fibS3}) { if (v > 0 && v < cp * 0.999) sup.add(v); }
+            // Volume POC
+            if (volumePoc > 0 && volumePoc < cp * 0.999) sup.add(volumePoc);
+            // Pivot points support
+            for (double v : new double[]{pivotPP, pivotS1d, pivotS2d}) { if (v > 0 && v < cp * 0.999) sup.add(v); }
+            // Unfilled gap support
+            if (gapSupport > 0 && gapSupport < cp * 0.999) sup.add(gapSupport);
             for (double v : rejectionSup) { if (v > 0 && v < cp * 0.999) sup.add(v); }
             res.sort(null);
             sup.sort((a, b) -> Double.compare(b, a));
@@ -1107,14 +1247,21 @@ public class StockAnalysisEngine {
             srS3 = sd.size() > 2 ? sd.get(2) : Math.round(cp * 0.97 * 100) / 100.0;
         }
 
-        // ── Composite trend score (0–100): weekly + MA stack + ADX slope + breadth + TF ──
+        // ── Composite trend score (0–100): weekly + MA stack + fan + structure + ADX + breadth + TF ──
         {
             int raw = 0;
             // Weekly bias: most important — ±30
             if      ("BULLISH".equals(weeklyBias)) raw += 30;
             else if ("BEARISH".equals(weeklyBias)) raw -= 30;
-            // MA stack: ±20 (centered at 2)
-            raw += (maStackScore - 2) * 10;
+            // MA stack: ±20 (5-level, centered)
+            raw += (int) Math.round((maStackScore / 5.0 - 0.5) * 40);
+            // Wide Fan: confirms trend strength — ±10
+            if      ("WIDE_BULL".equals(fanState))   raw += 10;
+            else if ("WIDE_BEAR".equals(fanState))   raw -= 10;
+            // Market structure: intact trend vs breakdown — ±8
+            if      ("BULLISH".equals(marketStructure)  && !structureBreak) raw += 8;
+            else if ("BEARISH".equals(marketStructure)  && !structureBreak) raw -= 8;
+            else if (structureBreak)                                         raw -= 5;
             // ADX slope: trend strengthening vs exhausting — ±10
             if      ("RISING".equals(adxDirection))  raw += 10;
             else if ("FALLING".equals(adxDirection)) raw -= 10;
@@ -1123,8 +1270,8 @@ public class StockAnalysisEngine {
             else if ("NARROW".equals(marketBreadth)) raw -= 10;
             // TF agreement (-4 to +4) → ±8
             raw += tfAgreement * 2;
-            // Normalize to 0–100 (raw range: -78 to +78)
-            compositeTrendScore = (int) Math.round(Math.max(0, Math.min(100, (raw + 78.0) / 156.0 * 100.0)));
+            // Normalize to 0–100 (raw range extended to ~±96)
+            compositeTrendScore = (int) Math.round(Math.max(0, Math.min(100, (raw + 96.0) / 192.0 * 100.0)));
             compositeTrendLabel = compositeTrendScore >= 70 ? "Strong Uptrend"
                                 : compositeTrendScore >= 55 ? "Uptrend"
                                 : compositeTrendScore >= 45 ? "Neutral"
@@ -1514,14 +1661,49 @@ public class StockAnalysisEngine {
                 : "No sell signals active";
 
         LocalDate expDate;
-        if (customDays == 0) {
-            expDate = today.with(TemporalAdjusters.next(DayOfWeek.FRIDAY));
-        } else {
+        if (customDays > 0) {
+            // User specified a custom timeframe — honour it exactly
             int calendarDaysToAdd = (int)(customDays * 1.45);
             expDate = today.plusDays(calendarDaysToAdd).with(TemporalAdjusters.nextOrSame(DayOfWeek.FRIDAY));
-            if (!expDate.isAfter(today)) {
+            if (!expDate.isAfter(today))
                 expDate = today.with(TemporalAdjusters.next(DayOfWeek.FRIDAY));
+        } else {
+            // Dynamic expiry: pick 1–4 weeks based on setup quality
+            int weeksOut;
+
+            if (earningsFlag && earningsDaysAway > 5 && earningsDaysAway <= 28) {
+                // Always land AFTER the earnings event so we don't hold through the binary risk
+                weeksOut = Math.min(4, (earningsDaysAway / 7) + 1);
+
+            } else if (ivRank > 70) {
+                // Expensive IV — we're selling premium; shorter expiry = faster theta, less gamma risk
+                weeksOut = (Math.abs(totalConfluenceScore) > 50) ? 1 : 2;
+
+            } else if (adxValue < 15 || bbwSqueeze) {
+                // Squeeze / flat coil — breakout can take weeks to develop; buy cheap options with room
+                weeksOut = (ivRank < 30) ? 4 : 3;
+
+            } else if (adxValue < 20) {
+                // Ranging / weak trend — give the range time to cycle
+                weeksOut = 2;
+
+            } else if (Math.abs(totalConfluenceScore) > 60 && adxValue > 25) {
+                // Strong trending + high-conviction — move is already underway, capture fast
+                weeksOut = 1;
+
+            } else if (ivRank < 30) {
+                // Cheap options — buy time for the move to develop
+                weeksOut = 3;
+
+            } else {
+                // Default sweet spot for most swing setups
+                weeksOut = 2;
             }
+
+            expDate = today.plusWeeks(weeksOut).with(TemporalAdjusters.nextOrSame(DayOfWeek.FRIDAY));
+            // Never expire today or in the past
+            if (!expDate.isAfter(today))
+                expDate = today.with(TemporalAdjusters.next(DayOfWeek.FRIDAY));
         }
         String targetExpiration = expDate.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
 
@@ -1624,12 +1806,12 @@ public class StockAnalysisEngine {
                          : "C".equals(recommendedStrategy) ? optionsLineC : optionsLineB;
         }
 
-        // Confidence score: percentage of independent signals agreeing with the final verdict direction
-        // Uses 9 signals: candlestick pattern + MACD divergence replace the correlated aboveSma20+d1TrendUp pair
+        // Confidence score: percentage of independent signals agreeing with final verdict
+        // 11 signals: 9 original + market structure + Stochastic RSI
         {
             boolean bullVerdict = totalConfluenceScore >= 15.0 && !forceNeutral;
             boolean bearVerdict = totalConfluenceScore <= -15.0 && !forceNeutral;
-            int aligned = 0, total = 9;
+            int aligned = 0, total = 11;
             if (bullVerdict) {
                 if (rsiBullish)                                                              aligned++;
                 if (macdBullish)                                                             aligned++;
@@ -1638,11 +1820,13 @@ public class StockAnalysisEngine {
                 if (volConfirmsBuy)                                                          aligned++;
                 if (d1TrendUp)                                                               aligned++;
                 if (tfAgreement >= 2)                                                        aligned++;
-                // Independent candlestick confirmation (not just trend following)
                 if ("HAMMER".equals(dailyCandlePattern) || "BULLISH_ENGULFING".equals(dailyCandlePattern)
                         || "BULLISH_MARUBOZU".equals(dailyCandlePattern))                   aligned++;
-                // MACD divergence absence: no bearish divergence = clean momentum
                 if (!"BEARISH_DIV".equals(macdDivergence))                                  aligned++;
+                // Market structure intact = +1
+                if ("BULLISH".equals(marketStructure) && !structureBreak)                   aligned++;
+                // StochRSI K above 50 = bullish momentum not exhausted
+                if (stochRsiK > 50 && stochRsiK < 85)                                      aligned++;
             } else if (bearVerdict) {
                 if (rsiBearish)                                                              aligned++;
                 if (macdBearish)                                                             aligned++;
@@ -1651,13 +1835,15 @@ public class StockAnalysisEngine {
                 if (volConfirmsSell)                                                         aligned++;
                 if (d1TrendDown)                                                             aligned++;
                 if (tfAgreement <= -2)                                                       aligned++;
-                // Independent candlestick confirmation
                 if ("SHOOTING_STAR".equals(dailyCandlePattern) || "BEARISH_ENGULFING".equals(dailyCandlePattern)
                         || "BEARISH_MARUBOZU".equals(dailyCandlePattern))                   aligned++;
-                // MACD divergence absence: no bullish divergence = clean downtrend
                 if (!"BULLISH_DIV".equals(macdDivergence))                                  aligned++;
+                // Market structure intact = +1
+                if ("BEARISH".equals(marketStructure) && !structureBreak)                   aligned++;
+                // StochRSI K below 50 = bearish momentum confirmed
+                if (stochRsiK < 50 && stochRsiK > 15)                                      aligned++;
             } else {
-                aligned = 4; // neutral = middle confidence
+                aligned = 5; // neutral = middle confidence (scaled for 11 signals)
             }
             confidenceScore = (int)((double) aligned / total * 100);
             confidenceLabel = confidenceScore >= 75 ? "High" : confidenceScore >= 50 ? "Moderate" : "Low";
@@ -1781,7 +1967,15 @@ public class StockAnalysisEngine {
                 + ",\"market_breadth\":\"%s\",\"breadth_rs\":%.2f"
                 + ",\"composite_trend_score\":%d,\"composite_trend_label\":\"%s\""
                 + ",\"win_probability\":%d,\"win_probability_label\":\"%s\""
-                + ",\"ema8\":%.2f,\"ema21\":%.2f,\"ema50\":%.2f,\"ema200\":%.2f"
+                + ",\"ema5\":%.2f,\"ema13\":%.2f,\"ema21\":%.2f,\"ema50\":%.2f,\"ema200\":%.2f"
+                + ",\"fan_state\":\"%s\",\"fan_spread_pct\":%.2f"
+                + ",\"market_structure\":\"%s\",\"structure_break\":%b"
+                + ",\"fib_r1\":%.2f,\"fib_r2\":%.2f,\"fib_r3\":%.2f"
+                + ",\"fib_s1\":%.2f,\"fib_s2\":%.2f,\"fib_s3\":%.2f"
+                + ",\"volume_poc\":%.2f"
+                + ",\"stoch_rsi_k\":%.2f"
+                + ",\"pivot_pp\":%.2f,\"pivot_r1\":%.2f,\"pivot_r2\":%.2f,\"pivot_s1\":%.2f,\"pivot_s2\":%.2f"
+                + ",\"gap_resistance\":%.2f,\"gap_support\":%.2f"
                 + ",\"strategy_a\":\"%s\",\"options_line_a\":\"%s\""
                 + ",\"strategy_b\":\"%s\",\"options_line_b\":\"%s\""
                 + ",\"strategy_c\":\"%s\",\"options_line_c\":\"%s\""
@@ -1830,7 +2024,15 @@ public class StockAnalysisEngine {
                 marketBreadth, breadthRs,
                 compositeTrendScore, compositeTrendLabel,
                 winProbability, winProbabilityLabel,
-                ema8d, ema21d, ema50d, ema200d,
+                ema5d, ema13d, ema21d, ema50d, ema200d,
+                fanState, fanSpreadPct,
+                marketStructure, structureBreak,
+                fibR1, fibR2, fibR3,
+                fibS1, fibS2, fibS3,
+                volumePoc,
+                stochRsiK,
+                pivotPP, pivotR1d, pivotR2d, pivotS1d, pivotS2d,
+                gapResistance, gapSupport,
                 strategyA, optionsLineA.replace("\"", "'"),
                 strategyB, optionsLineB.replace("\"", "'"),
                 strategyC, optionsLineC.replace("\"", "'"),

@@ -254,6 +254,87 @@ public final class IndicatorUtils {
         return adx;
     }
 
+    // ── Stochastic RSI ────────────────────────────────────────────────────────
+
+    /**
+     * Stochastic RSI — applies stochastic oscillator to a rolling RSI series.
+     * Returns double[]{%K, %D} where %K is the fast line (0–100) and %D is its 3-period SMA.
+     * Uses a single-pass RSI history build for efficiency.
+     */
+    public static double[] calculateStochRsiFromBars(JsonNode bars, int rsiPeriod, int stochPeriod) {
+        int len = bars.size();
+        if (len < rsiPeriod + stochPeriod + 3) return new double[]{50.0, 50.0};
+        // Build rolling RSI history for all bars
+        double[] rsiHist = new double[len];
+        double avgGain = 0, avgLoss = 0;
+        for (int i = 1; i <= rsiPeriod && i < len; i++) {
+            double diff = bars.get(i).path("c").asDouble() - bars.get(i - 1).path("c").asDouble();
+            if (diff > 0) avgGain += diff; else avgLoss -= diff;
+        }
+        avgGain /= rsiPeriod; avgLoss /= rsiPeriod;
+        rsiHist[rsiPeriod] = avgLoss < 0.0001 ? (avgGain > 0 ? 95.0 : 50.0) : 100.0 - (100.0 / (1.0 + avgGain / avgLoss));
+        for (int i = rsiPeriod + 1; i < len; i++) {
+            double diff = bars.get(i).path("c").asDouble() - bars.get(i - 1).path("c").asDouble();
+            double g = diff > 0 ? diff : 0, l = diff < 0 ? -diff : 0;
+            avgGain = (avgGain * (rsiPeriod - 1) + g) / rsiPeriod;
+            avgLoss = (avgLoss * (rsiPeriod - 1) + l) / rsiPeriod;
+            rsiHist[i] = avgLoss < 0.0001 ? (avgGain > 0 ? 95.0 : 50.0) : 100.0 - (100.0 / (1.0 + avgGain / avgLoss));
+        }
+        // Compute %K for last 3 positions (to get %D = 3-period SMA of %K)
+        int endIdx = len - 1;
+        double[] kVals = new double[3];
+        for (int j = 0; j < 3; j++) {
+            int kEnd   = endIdx - (2 - j);
+            int kStart = kEnd - stochPeriod + 1;
+            if (kStart < rsiPeriod) { kVals[j] = 50.0; continue; }
+            double minR = Double.MAX_VALUE, maxR = -Double.MAX_VALUE;
+            for (int i = kStart; i <= kEnd; i++) {
+                if (rsiHist[i] < minR) minR = rsiHist[i];
+                if (rsiHist[i] > maxR) maxR = rsiHist[i];
+            }
+            kVals[j] = maxR > minR ? (rsiHist[kEnd] - minR) / (maxR - minR) * 100.0 : 50.0;
+        }
+        return new double[]{kVals[2], (kVals[0] + kVals[1] + kVals[2]) / 3.0};
+    }
+
+    // ── Volume Profile ────────────────────────────────────────────────────────
+
+    /**
+     * Point of Control (POC) — price level with the highest total volume over
+     * the last {@code lookback} daily bars. Uses 50 equal-width price buckets.
+     * Returns the midpoint of the highest-volume bucket, or 0 if insufficient data.
+     */
+    public static double calculateVolumePoc(JsonNode bars, int lookback) {
+        int len = bars.size();
+        if (len < 5) return 0.0;
+        int start = Math.max(0, len - lookback);
+        double lo = Double.MAX_VALUE, hi = -Double.MAX_VALUE;
+        for (int i = start; i < len; i++) {
+            double h = bars.get(i).path("h").asDouble(0);
+            double l = bars.get(i).path("l").asDouble(Double.MAX_VALUE);
+            if (h > hi) hi = h;
+            if (l > 0 && l < lo) lo = l;
+        }
+        if (hi <= lo || lo <= 0 || lo == Double.MAX_VALUE) return 0.0;
+        int buckets = 50;
+        double bucketSize = (hi - lo) / buckets;
+        if (bucketSize <= 0) return 0.0;
+        double[] vol = new double[buckets];
+        for (int i = start; i < len; i++) {
+            double h = bars.get(i).path("h").asDouble(0);
+            double l = bars.get(i).path("l").asDouble(0);
+            long   v = bars.get(i).path("v").asLong(0);
+            if (h <= 0 || l <= 0 || v == 0) continue;
+            int bLo = (int) Math.max(0, Math.floor((l - lo) / bucketSize));
+            int bHi = (int) Math.min(buckets - 1, Math.floor((h - lo) / bucketSize));
+            double perBucket = (double) v / (bHi - bLo + 1);
+            for (int b = bLo; b <= bHi; b++) vol[b] += perBucket;
+        }
+        int poc = 0;
+        for (int i = 1; i < buckets; i++) if (vol[i] > vol[poc]) poc = i;
+        return lo + (poc + 0.5) * bucketSize;
+    }
+
     // ── Pattern detection ─────────────────────────────────────────────────────
 
     /**
