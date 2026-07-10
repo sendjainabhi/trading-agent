@@ -31,6 +31,16 @@
         <button class="wl-add-btn" onclick="addFavorite()" title="Add to watchlist">+</button>
     </div>
     <div id="wlList" class="wl-list"></div>
+    <div id="wl-pulse-section" style="display:none">
+        <div class="wl-pulse-resize-handle" id="wl-pulse-resize-handle" title="Drag to resize"></div>
+        <div class="wl-pulse-header" onclick="toggleWlPulse()">
+            <span style="flex:1">📰 Market Pulse</span>
+            <button class="wl-pulse-refresh-btn" onclick="refreshMarketPulse();event.stopPropagation()" title="Refresh news">⟳</button>
+            <button class="wl-pulse-toggle-btn" id="wl-pulse-toggle-btn">▼</button>
+        </div>
+        <div id="wl-pulse-items" class="wl-pulse-items"></div>
+    </div>
+
     <div class="wl-footer">
         <span class="wl-time" id="wlTime"></span>
         <select class="wl-interval-sel" id="wlInterval" onchange="setWlInterval(this.value)">
@@ -98,7 +108,7 @@
         <button class="mb-refresh-btn" id="mb-refresh-btn" onclick="manualMbRefresh()" title="Refresh prices">⟳</button>
     </div>
 
-    <div id="chat-window">
+<div id="chat-window">
         <div class="message agent">
             Hello! I am your AI-Powered Trading Agent. Ask me for live stock prices, multi-timeframe analysis, or a detailed trade plan for any US equity.
         </div>

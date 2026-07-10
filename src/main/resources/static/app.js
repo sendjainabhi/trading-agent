@@ -4,6 +4,9 @@ let lastAgentMsg          = null;
 let refreshTimerId        = null;
 let activeAbortController = null;
 let stripGeneration       = 0;
+let lastPulseData         = null;
+let wlPulseCollapsed      = false;
+let wlPulseStoredHeight   = 200;
 
 // ── marked: don't wrap block-level LLM HTML in <p> tags ──────────────────
 (function () {
@@ -1578,9 +1581,114 @@ async function manualMbRefresh() {
     await refreshMarketBar();
 }
 
+// ── Market Pulse (economic events + breaking news) ────────────────────────
+
+function renderMarketPulse(data) {
+    lastPulseData = data;
+    renderWlPulse(data.news || []);
+}
+
+async function refreshMarketPulse() {
+    const btn = document.getElementById('wl-pulse-refresh-btn');
+    if (btn) { btn.style.opacity = '0.4'; btn.style.pointerEvents = 'none'; }
+    try {
+        const r = await fetch('/api/market/pulse');
+        if (r.ok) renderMarketPulse(await r.json());
+    } catch { /* silent */ }
+    finally {
+        if (btn) { btn.style.opacity = ''; btn.style.pointerEvents = ''; }
+    }
+}
+
+function renderWlPulse(newsItems) {
+    const section = document.getElementById('wl-pulse-section');
+    const list    = document.getElementById('wl-pulse-items');
+    if (!section || !list) return;
+    if (!newsItems || newsItems.length === 0) { section.style.display = 'none'; return; }
+    list.innerHTML = '';
+    newsItems.forEach(item => {
+        const dotCls = item.score >= 10 ? 'critical' : item.score >= 8 ? 'major' : 'notable';
+        const el = document.createElement('div');
+        el.className = 'wl-pulse-item';
+        el.title = item.headline;
+        if (item.url) el.onclick = () => window.open(item.url, '_blank', 'noopener');
+        el.innerHTML =
+            `<span class="wl-pulse-dot ${dotCls}">●</span>` +
+            `<span class="wl-pulse-headline">${item.headline}</span>` +
+            `<span class="wl-pulse-age">${item.ageLabel}</span>`;
+        list.appendChild(el);
+    });
+    section.style.display = '';
+    if (!section.style.height) section.style.height = wlPulseStoredHeight + 'px';
+    const toggleBtn = document.getElementById('wl-pulse-toggle-btn');
+    if (wlPulseCollapsed) {
+        section.style.height = '36px';
+        if (toggleBtn) toggleBtn.textContent = '▶';
+    } else {
+        if (toggleBtn) toggleBtn.textContent = '▼';
+    }
+}
+
+function toggleWlPulse() {
+    wlPulseCollapsed = !wlPulseCollapsed;
+    const section   = document.getElementById('wl-pulse-section');
+    const toggleBtn = document.getElementById('wl-pulse-toggle-btn');
+    if (!section) return;
+    if (wlPulseCollapsed) {
+        wlPulseStoredHeight = section.offsetHeight || 200;
+        section.style.height = '36px';
+    } else {
+        section.style.height = wlPulseStoredHeight + 'px';
+    }
+    if (toggleBtn) toggleBtn.textContent = wlPulseCollapsed ? '▶' : '▼';
+}
+
+function initWlPulseResize() {
+    const handle  = document.getElementById('wl-pulse-resize-handle');
+    const section = document.getElementById('wl-pulse-section');
+    if (!handle || !section) return;
+    let startY, startH;
+    handle.addEventListener('mousedown', e => {
+        startY = e.clientY;
+        startH = section.offsetHeight;
+        handle.classList.add('dragging');
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor     = 'ns-resize';
+        const onMove = ev => {
+            const delta = startY - ev.clientY;   // up = positive = taller
+            const newH  = Math.max(36, Math.min(420, startH + delta));
+            section.style.height = newH + 'px';
+            if (newH > 44 && wlPulseCollapsed) {
+                wlPulseCollapsed = false;
+                const btn = document.getElementById('wl-pulse-toggle-btn');
+                if (btn) btn.textContent = '▼';
+            }
+        };
+        const onUp = () => {
+            wlPulseStoredHeight = section.offsetHeight;
+            handle.classList.remove('dragging');
+            document.body.style.userSelect = '';
+            document.body.style.cursor     = '';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        e.preventDefault();
+    });
+}
+
+function initMarketPulse() {
+    refreshMarketPulse();
+    // Refresh every 15 minutes — matches server-side cache TTL
+    setInterval(refreshMarketPulse, 15 * 60 * 1000);
+}
+
 autoConnect();
 // Apply theme from localStorage immediately (fast path before server responds)
 applyTheme(localStorage.getItem(THEME_KEY) || 'light');
 initPrefs();
 initChipState();
 initMarketBar();
+initMarketPulse();
+initWlPulseResize();

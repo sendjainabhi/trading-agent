@@ -53,6 +53,7 @@ public class TradingAgentController {
     private final AlpacaStreamService alpacaStreamService;
     private final UserPrefsService    userPrefsService;
     private final MarketClockService  marketClockService;
+    private final MarketPulseService  marketPulseService;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -61,11 +62,18 @@ public class TradingAgentController {
     public TradingAgentController(TradingAgentService tradingAgentService,
                                   AlpacaStreamService alpacaStreamService,
                                   UserPrefsService userPrefsService,
-                                  MarketClockService marketClockService) {
+                                  MarketClockService marketClockService,
+                                  MarketPulseService marketPulseService) {
         this.tradingAgentService = tradingAgentService;
         this.alpacaStreamService = alpacaStreamService;
         this.userPrefsService    = userPrefsService;
         this.marketClockService  = marketClockService;
+        this.marketPulseService  = marketPulseService;
+    }
+
+    @GetMapping("/api/market/pulse")
+    public MarketPulseService.MarketPulseResult getMarketPulse() {
+        return marketPulseService.getMarketPulse();
     }
 
     // 15-second TTL cache — prevents hammering Yahoo Finance on every UI refresh tick

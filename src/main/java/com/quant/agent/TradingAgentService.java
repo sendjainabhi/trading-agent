@@ -105,6 +105,9 @@ public class TradingAgentService {
     @Autowired
     private TechnicalAnalysisService scannerService;
 
+    @Autowired
+    private MarketPulseService marketPulseService;
+
     private final ChatClient.Builder ollamaClientBuilder;
     private final Map<String, ChatClient> providerClients = new ConcurrentHashMap<>();
     private volatile ChatClient activeChatClient;
@@ -1266,12 +1269,54 @@ public class TradingAgentService {
 
     // ── Request pipeline ──────────────────────────────────────────────────────
 
+    private String buildPulseContext(String enrichedInput) {
+        // Skip for scanner queries — not relevant to single stock context
+        boolean isScanner = enrichedInput.contains("[Intent: Call bearishScannerFunction")
+                || enrichedInput.contains("[Intent: Call bullishScannerFunction")
+                || enrichedInput.contains("[Intent: Call generalMarketScannerFunction")
+                || enrichedInput.contains("[Intent: Call preMarketScannerFunction")
+                || enrichedInput.contains("[Intent: Call swingScannerFunction")
+                || enrichedInput.contains("[Intent: Call wheelStrategyScannerFunction")
+                || enrichedInput.contains("[Intent: Call sectorRotationScannerFunction")
+                || enrichedInput.contains("[Intent: Call squeezeScannerFunction")
+                || enrichedInput.contains("[Intent: Call earningsPlaysScannerFunction")
+                || enrichedInput.contains("[Intent: Call failedBreakdownScannerFunction")
+                || enrichedInput.contains("[Intent: Call watchlistScannerFunction");
+        if (isScanner) return "";
+        try {
+            MarketPulseService.MarketPulseResult pulse = marketPulseService.getMarketPulse();
+            if (pulse == null) return "";
+            StringBuilder sb = new StringBuilder();
+            if (!pulse.events().isEmpty()) {
+                sb.append("\n\n[MACRO CALENDAR — next high-impact US events:]\n");
+                pulse.events().stream().limit(3).forEach(ev -> {
+                    sb.append("• ").append(ev.etTime()).append(" — ").append(ev.event());
+                    if (!ev.estimate().isEmpty()) sb.append(" (Est: ").append(ev.estimate())
+                            .append(ev.unit().isEmpty() ? "" : " " + ev.unit()).append(")");
+                    sb.append("\n");
+                });
+                sb.append("Consider whether the analyzed stock's sector is sensitive to these events.");
+            }
+            if (!pulse.news().isEmpty()) {
+                sb.append("\n\n[BREAKING MARKET NEWS — may impact this stock or its sector:]\n");
+                pulse.news().stream().limit(3).forEach(item ->
+                    sb.append("• [").append(item.ageLabel()).append("] ").append(item.headline()).append("\n"));
+                sb.append("If any news above is directly relevant to the stock you're analyzing (same sector/company/macro driver), "
+                        + "mention it in the 'What's Happening' section with its specific impact on this ticker.");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     private String injectDynamicContext(String input) {
         ZonedDateTime now = ZonedDateTime.now(ZoneId.of("America/New_York"));
         String timeStamp   = now.format(DateTimeFormatter.ofPattern("hh:mm:ss a z"));
         String currentDate = now.format(DateTimeFormatter.ofPattern("MMMM dd, yyyy"));
         String enriched    = enrichPrompt(input);
-        return "/no_think\n" + enriched + "\n\n[System Note: Request processed at " + timeStamp + " on " + currentDate + ".]";
+        String pulseCtx    = buildPulseContext(enriched);
+        return "/no_think\n" + enriched + pulseCtx + "\n\n[System Note: Request processed at " + timeStamp + " on " + currentDate + ".]";
     }
 
     private record ScanResult(String data, String label) {}
